@@ -1,0 +1,84 @@
+{
+    "entities": [
+      {
+        "entity": "DATE",
+        "examples": [
+          "tomorrow",
+          "next Monday",
+          "on Friday",
+          "March 10",
+          "next week",
+          "this afternoon",
+          "day after tomorrow",
+          "next month",
+          "January 15th",
+          "in two days",
+          "the coming weekend",
+          "next Tuesday at 3",
+          "the following Wednesday",
+          "October 5th, 2023",
+          "in the next few days"
+        ]
+      },
+      {
+        "entity": "TIME",
+        "examples": [
+          "2 PM",
+          "3:30 PM",
+          "at noon",
+          "at 10 AM",
+          "around 4",
+          "in the morning",
+          "5 o'clock",
+          "at 15:45",
+          "6:30 in the evening",
+          "first thing in the morning",
+          "mid-afternoon",
+          "midnight",
+          "quarter past nine",
+          "half past twelve",
+          "right after lunch"
+        ]
+      },
+      {
+        "entity": "DURATION",
+        "examples": [
+          "1 hour",
+          "30 minutes",
+          "2 hours",
+          "an hour and a half",
+          "45 mins",
+          "just 15 minutes",
+          "all day",
+          "for 2 hours",
+          "half an hour",
+          "for about an hour",
+          "90 minutes long",
+          "20 min",
+          "three hours",
+          "a couple of hours",
+          "brief 10-minute"
+        ]
+      },
+      {
+        "entity": "ATTENDEE",
+        "examples": [
+          "John",
+          "Sarah",
+          "the team",
+          "my manager",
+          "Alex and Lisa",
+          "the marketing department",
+          "Michael from sales",
+          "Dr. Smith",
+          "the project team",
+          "our clients",
+          "Jessica and her team",
+          "the board members",
+          "everyone in engineering",
+          "Tom, Dick, and Harry",
+          "the stakeholders"
+        ]
+      }
+    ]
+  } 

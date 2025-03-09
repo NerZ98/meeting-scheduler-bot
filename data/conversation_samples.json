@@ -1,0 +1,120 @@
+[
+  [
+    {
+      "role": "user",
+      "text": "Hi"
+    },
+    {
+      "role": "bot",
+      "text": "Hello! How can I help you today?"
+    },
+    {
+      "role": "user",
+      "text": "Schedule a meeting for tomorrow"
+    },
+    {
+      "role": "bot",
+      "text": "Got it. What time should I schedule it for?"
+    },
+    {
+      "role": "user",
+      "text": "Schedule it at 2pm for 1 hour"
+    },
+    {
+      "role": "bot",
+      "text": "Sure! Who should I add to this meeting?"
+    },
+    {
+      "role": "user",
+      "text": "Add John and Sarah to this meeting"
+    },
+    {
+      "role": "bot",
+      "text": "Okay! Let me confirm:\n* Date: Tomorrow\n* Time: 2 PM\n* Duration: 1 hour\n* Attendees: John, Sarah\nIs that correct?"
+    },
+    {
+      "role": "user",
+      "text": "Yes, confirm the meeting"
+    },
+    {
+      "role": "bot",
+      "text": "\u2705 Meeting scheduled successfully!"
+    }
+  ],
+  [
+    {
+      "role": "user",
+      "text": "Hi"
+    },
+    {
+      "role": "bot",
+      "text": "Hello! How can I help you today?"
+    },
+    {
+      "role": "user",
+      "text": "Schedule a meeting for tomorrow"
+    },
+    {
+      "role": "bot",
+      "text": "What time should I schedule it for?"
+    },
+    {
+      "role": "user",
+      "text": "Schedule it at 2pm for 1 hour"
+    },
+    {
+      "role": "bot",
+      "text": "Who should I add to this meeting?"
+    },
+    {
+      "role": "user",
+      "text": "Add John and Sarah"
+    },
+    {
+      "role": "bot",
+      "text": "Got it. Confirm the meeting?"
+    },
+    {
+      "role": "user",
+      "text": "Actually, change the time to 3pm"
+    },
+    {
+      "role": "bot",
+      "text": "No problem. Time changed to 3 PM.\n* Date: Tomorrow\n* Time: 3 PM\n* Duration: 1 hour\n* Attendees: John, Sarah\nIs that correct?"
+    },
+    {
+      "role": "user",
+      "text": "Yes, confirm"
+    },
+    {
+      "role": "bot",
+      "text": "\u2705 Meeting scheduled successfully!"
+    }
+  ],
+  [
+    {
+      "role": "user",
+      "text": "Add Alex to the meeting"
+    },
+    {
+      "role": "bot",
+      "text": "\u2705 Alex has been added.\n* Attendees: John, Sarah, Alex\nIs there anything else you'd like to change?"
+    },
+    {
+      "role": "user",
+      "text": "Actually, make it 30 minutes"
+    },
+    {
+      "role": "bot",
+      "text": "\u2705 Duration changed to 30 minutes.\n* Time: 3 PM\n* Duration: 30 minutes\nIs that correct?"
+    },
+    {
+      "role": "user",
+      "text": "Yes"
+    },
+    {
+      "role": "bot",
+      "text": "\u2705 Meeting scheduled successfully!"
+    }
+  ]
+]
