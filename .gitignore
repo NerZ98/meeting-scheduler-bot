@@ -1,6 +1,8 @@
 /venv
 /__pycache__
 /models/saved
-*.pyc 
+*.pyc
 *.pt
 *.csv
+/.env
+*.env

@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Meeting Scheduler Bot</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Meeting Scheduler Bot</h1>
+            <div class="header-actions">
+                <button id="ms-auth-btn" class="btn btn-light">Connect to Microsoft</button>
+            </div>
+        </header>
+        
+        <div class="chat-container">
+            <div class="chat-messages" id="chat-messages">
+                <!-- Messages will be added here dynamically -->
+            </div>
+            <div class="chat-input">
+                <input type="text" id="user-input" placeholder="Type your message here..." autofocus>
+                <button id="send-button">Send</button>
+            </div>
+        </div>
+        
+        <div class="meeting-details">
+            <h2>Current Meeting Details</h2>
+            <div class="detail-item">
+                <h3>Date</h3>
+                <p id="meeting-date">Not specified</p>
+            </div>
+            <div class="detail-item">
+                <h3>Time</h3>
+                <p id="meeting-time">Not specified</p>
+            </div>
+            <div class="detail-item">
+                <h3>Duration</h3>
+                <p id="meeting-duration">Not specified</p>
+            </div>
+            <div class="detail-item">
+                <h3>Attendees</h3>
+                <ul id="meeting-attendees">
+                    <li>No attendees added</li>
+                </ul>
+            </div>
+            <div class="detail-item">
+                <h3>Status</h3>
+                <span class="meeting-status status-pending" id="meeting-status">Pending</span>
+            </div>
+            <div class="action-buttons">
+                <button id="confirm-btn" class="btn btn-confirm" disabled>Confirm Meeting</button>
+                <button id="cancel-btn" class="btn btn-cancel" disabled>Cancel Meeting</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
