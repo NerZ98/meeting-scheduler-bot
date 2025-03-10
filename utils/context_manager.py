@@ -26,7 +26,7 @@ class MeetingContext:
         self.conversation_history = []
         self.meeting_id = None  # Unique identifier for this meeting
         self.last_update = None  # Track what was last updated
-    
+        
     def update_from_entities(self, entities):
         """Update the meeting context based on extracted entities"""
         entity_updates = {}  # Track what was updated for debugging
@@ -76,20 +76,14 @@ class MeetingContext:
                     break  # Take the first valid duration
         
         if 'ATTENDEE' in entities and entities['ATTENDEE']:
-            # Reset attendees list to avoid duplicates when updating
-            self.attendees = []
-            
-            # Clean and deduplicate attendees
-            attendee_set = set()  # Use a set to avoid duplicates
+            # Create a set to store unique attendees
+            unique_attendees = set()
             
             for attendee in entities['ATTENDEE']:
                 if not attendee:
                     continue
                     
-                # Split by commas, 'and', etc.
-                import re
-                
-                # First, clean up the attendee text
+                # Clean up the attendee text
                 cleaned_attendee = attendee.lower()
                 
                 # Remove special tags like [sep]
@@ -111,28 +105,34 @@ class MeetingContext:
                     if not person or len(person) <= 1:  # Skip empty names or single characters
                         continue
                         
-                    # Check if this is likely a full name
+                    # Split the name into parts
                     name_parts = person.split()
                     
-                    # Only process if there's at least one part
-                    if name_parts:
-                        # If it's a full name, capitalize each part
-                        if len(name_parts) > 1:
-                            # Capitalize each part of the name
-                            capitalized_name = ' '.join(part.capitalize() for part in name_parts)
-                        else:
-                            # Just a single name
-                            capitalized_name = name_parts[0].capitalize()
+                    # Handle full names
+                    if len(name_parts) > 1:
+                        # Capitalize each part of the full name
+                        full_name = ' '.join(part.capitalize() for part in name_parts)
                         
-                        # Add to our set if it's not already there
-                        if capitalized_name not in attendee_set:
-                            attendee_set.add(capitalized_name)
-                            print(f"Added attendee: {capitalized_name}")
+                        # Check if full name already exists (case-insensitive)
+                        if not any(full_name.lower() == existing.lower() for existing in unique_attendees):
+                            # Remove any existing partial names
+                            unique_attendees = {
+                                existing for existing in unique_attendees 
+                                if existing.lower() not in full_name.lower()
+                            }
+                            unique_attendees.add(full_name)
+                    else:
+                        # Single name case
+                        capitalized_name = person.capitalize()
+                        
+                        # Avoid adding if a fuller version already exists
+                        if not any(capitalized_name.lower() in existing.lower() for existing in unique_attendees):
+                            unique_attendees.add(capitalized_name)
             
-            # Update the attendees list with the deduplicated set
-            self.attendees = list(attendee_set)
+            # Update the attendees list
+            self.attendees = list(unique_attendees)
             entity_updates['attendees'] = self.attendees
-                        
+        
         # Check for time in text if TIME entity not detected
         # This is a fallback mechanism
         for entity_type, values in entities.items():
@@ -151,7 +151,7 @@ class MeetingContext:
             print(f"Updated entities: {entity_updates}")
             
         return entity_updates
-    
+
     def _process_raw_text(self, text, already_updated):
         """
         Process raw text for additional entities that might have been missed

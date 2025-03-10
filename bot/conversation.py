@@ -77,6 +77,16 @@ class MeetingSchedulerBot:
     
     def reset(self):
         """
-        Reset the bot state
+        Reset the bot state completely, clearing all meeting context
         """
+        # Completely reset the conversation state
         self.state = ConversationState()
+        
+        # Reset the current meeting context explicitly
+        self.state.current_meeting_id = None
+        self.state.meetings.clear()
+        self.state.conversation_history.clear()
+        self.state.last_intent = None
+        self.state.waiting_for = None
+        
+        return "Meeting context has been reset. I'm ready to start over. How can I help you schedule a meeting?"

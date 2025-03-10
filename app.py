@@ -242,6 +242,15 @@ def logout():
 def serve_css():
     return send_from_directory('static', 'styles.css')
 
+@app.route('/api/reset', methods=['POST'])
+def reset_bot():
+    """Reset the bot's conversation context"""
+    response = bot.reset()
+    return jsonify({
+        'success': True,
+        'message': response
+    })
+
 @app.route('/script.js')
 def serve_js():
     return send_from_directory('static', 'script.js')

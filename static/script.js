@@ -196,6 +196,60 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
     
+    async function resetBotContext() {
+        try {
+            const response = await fetch('/api/reset', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            const data = await response.json();
+            
+            if (data.success) {
+                // Clear the chat messages
+                chatMessages.innerHTML = '';
+                
+                // Reset meeting details
+                meetingDetails = {
+                    date: null,
+                    time: null,
+                    duration: null,
+                    attendees: [],
+                    status: 'pending',
+                    is_confirmed: false,
+                    is_cancelled: false
+                };
+                
+                // Update meeting details panel
+                updateMeetingDetails(meetingDetails);
+                
+                // Add the reset confirmation message
+                const resetMessage = document.createElement('div');
+                resetMessage.classList.add('message', 'bot-message');
+                resetMessage.textContent = data.message || 'Meeting context has been reset.';
+                chatMessages.appendChild(resetMessage);
+                
+                // Re-add initial greeting
+                const initialGreeting = document.createElement('div');
+                initialGreeting.classList.add('message', 'bot-message');
+                initialGreeting.textContent = "Hello! I'm your meeting scheduling assistant. How can I help you today?";
+                chatMessages.appendChild(initialGreeting);
+                
+                // Scroll to the bottom of the chat
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+                
+                // Enable/disable buttons
+                if (confirmBtn) confirmBtn.disabled = true;
+                if (cancelBtn) cancelBtn.disabled = true;
+            }
+        } catch (error) {
+            console.error('Error resetting bot context:', error);
+            addMessage('Failed to reset meeting context. Please try again.');
+        }
+    }
+
     // Event listener for send button
     if (sendButton) {
         sendButton.addEventListener('click', function() {
@@ -277,9 +331,9 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Cancel Meeting button
     if (cancelBtn) {
-        cancelBtn.addEventListener('click', function() {
-            addMessage("Cancel meeting", true);
-            sendMessage("Cancel this meeting");
+        cancelBtn.addEventListener('click', async function() {
+            // Always reset the bot context when cancel button is clicked
+            await resetBotContext();
         });
     }
     
