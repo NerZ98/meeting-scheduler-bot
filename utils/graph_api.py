@@ -268,11 +268,11 @@ class MicrosoftGraphClient:
             },
             "start": {
                 "dateTime": start_time,
-                "timeZone": "UTC"
+                "timeZone": "India Standard Time"  # Changed from UTC to IST
             },
             "end": {
                 "dateTime": end_time,
-                "timeZone": "UTC"
+                "timeZone": "India Standard Time"  # Changed from UTC to IST
             },
             "location": {
                 "displayName": meeting_data.get('location', '')
@@ -298,7 +298,7 @@ class MicrosoftGraphClient:
 
     def update_meeting(self, user_id, meeting_id, meeting_data):
         """
-        Update an existing meeting
+        Update an existing meeting using the Microsoft Graph API
         
         Parameters:
         - user_id: User's ID (from token)
@@ -331,11 +331,11 @@ class MicrosoftGraphClient:
             
             update["start"] = {
                 "dateTime": start_time,
-                "timeZone": "UTC"
+                "timeZone": "India Standard Time"  # Changed from UTC to IST
             }
             update["end"] = {
                 "dateTime": end_time,
-                "timeZone": "UTC"
+                "timeZone": "India Standard Time"  # Changed from UTC to IST
             }
         
         if 'location' in meeting_data:
@@ -405,11 +405,11 @@ class MicrosoftGraphClient:
             "schedules": schedules,
             "startTime": {
                 "dateTime": start_time,
-                "timeZone": "UTC"
+                "timeZone": "India Standard Time"  # Changed from UTC to IST
             },
             "endTime": {
                 "dateTime": end_time,
-                "timeZone": "UTC"
+                "timeZone": "India Standard Time"  # Changed from UTC to IST
             },
             "availabilityViewInterval": 15  # 15-minute intervals
         }
