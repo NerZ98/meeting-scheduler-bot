@@ -23,21 +23,22 @@ class MeetingSchedulerWithGraphAPI:
         Get authorization URL for OAuth consent flow
         
         Returns:
-        - Tuple of (auth_url, state) where state should be stored in session
+        - Tuple of (auth_url, state, code_verifier) where state should be stored in session
         """
         return self.graph_client.get_auth_url()
     
-    def handle_auth_callback(self, code):
+    def handle_auth_callback(self, code, code_verifier=None):
         """
         Handle the OAuth callback and exchange code for token
         
         Parameters:
         - code: Authorization code from callback
+        - code_verifier: Optional PKCE code verifier
         
         Returns:
         - Result of token exchange
         """
-        return self.graph_client.get_token_from_code(code)
+        return self.graph_client.get_token_from_code(code, code_verifier)
     
     def schedule_meeting(self, meeting_context, user_id=None):
         """
@@ -51,11 +52,20 @@ class MeetingSchedulerWithGraphAPI:
         - Dictionary with meeting details and Graph API response
         """
         try:
+            # Debug: Print the user_id
+            self.logger.info(f"DEBUG: Scheduling meeting with user_id: {user_id}")
+            
             # Convert meeting context to meeting data for Graph API
             meeting_data = self._convert_meeting_context_to_graph_data(meeting_context)
             
+            # Debug: Print the meeting_data
+            self.logger.info(f"DEBUG: Meeting data prepared for Graph API: {json.dumps(meeting_data, default=str)}")
+            
             # Call the Graph API to create the meeting
             graph_response = self.graph_client.create_meeting(user_id, meeting_data)
+            
+            # Debug: Print response
+            self.logger.info(f"DEBUG: Graph API response: {json.dumps(graph_response, default=str)}")
             
             # Store the meeting ID for future reference
             meeting_id = graph_response.get('id')
@@ -74,6 +84,8 @@ class MeetingSchedulerWithGraphAPI:
         
         except Exception as e:
             self.logger.error(f"Error scheduling meeting: {str(e)}")
+            import traceback
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
             return {
                 'success': False,
                 'error': str(e)
@@ -186,7 +198,7 @@ class MeetingSchedulerWithGraphAPI:
             for attendee in meeting_context.attendees:
                 # In a real app, you'd look up emails from your system or a directory
                 # This is a simplified placeholder approach
-                attendee_email = f"{attendee.lower().replace(' ', '.')}@example.com"
+                attendee_email = f"{attendee.lower().replace(' ', '.')}@biz4solutions.com"
                 attendee_emails.append(attendee_email)
             
             # Convert date and time to ISO format
@@ -289,6 +301,9 @@ class MeetingSchedulerWithGraphAPI:
             'duration_minutes': duration_minutes,
             'attendees': meeting_context.attendees
         }
+        
+        # Debug print
+        self.logger.info(f"DEBUG: Built meeting data: {json.dumps(meeting_data, default=str)}")
         
         return meeting_data
     

@@ -61,28 +61,44 @@ def process_message():
     # Get current meeting state
     meeting_state = bot.get_current_meeting_state()
     
+    # Debug logging
+    logger.info(f"DEBUG: Current session info: {session}")
+    logger.info(f"DEBUG: User authenticated: {'user_id' in session}")
+    if 'user_id' in session:
+        logger.info(f"DEBUG: User ID from session: {session.get('user_id')}")
+    
     # If meeting is confirmed and we need to schedule in Microsoft Calendar
     if meeting_state.get('is_confirmed', False) and not meeting_state.get('graph_scheduled', False):
         try:
             # Check if user is authenticated
             user_id = session.get('user_id')
+            logger.info(f"DEBUG: Using user_id from session for scheduling: {user_id}")
             
             if user_id:
                 # Get the current meeting context
                 meeting_context = bot.state.get_current_meeting()
+                logger.info(f"DEBUG: Meeting context for scheduling: {meeting_context.to_dict()}")
                 
                 # Schedule the meeting in Microsoft Graph
                 result = graph_integration.schedule_meeting(meeting_context, user_id)
+                logger.info(f"DEBUG: Schedule meeting result: {result}")
                 
                 if result['success']:
                     # Update meeting state with Graph API information
                     meeting_state['graph_scheduled'] = True
                     meeting_state['graph_meeting_id'] = result.get('meeting_id')
-                    meeting_state['teams_link'] = result.get('response', {}).get('onlineMeeting', {}).get('joinUrl')
                     
-                    # Add Teams meeting link to response if available
-                    if meeting_state.get('teams_link'):
+                    # Safely extract Teams link if available
+                    online_meeting = result.get('response', {}).get('onlineMeeting')
+                    if online_meeting and 'joinUrl' in online_meeting:
+                        meeting_state['teams_link'] = online_meeting.get('joinUrl')
+                        # Add Teams meeting link to response if available
                         response += f"\n\nTeams meeting link: {meeting_state['teams_link']}"
+                    else:
+                        # Regular meeting created but no Teams link
+                        logger.info("Meeting created successfully but no Teams link available")
+                        meeting_state['teams_link'] = None
+                        response += "\n\nMeeting has been added to your calendar."
                 else:
                     logger.error(f"Failed to schedule meeting in Microsoft Graph: {result.get('error')}")
                     
@@ -94,6 +110,8 @@ def process_message():
                 response += "\n\nTo create this meeting in your Microsoft calendar, please click 'Connect to Microsoft' to authorize access."
         except Exception as e:
             logger.error(f"Error scheduling meeting in Microsoft Graph: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
     
     # If meeting is cancelled and it was scheduled in Graph
     elif meeting_state.get('is_cancelled', False) and meeting_state.get('graph_scheduled', False):
@@ -130,11 +148,18 @@ def process_message():
 def connect_microsoft():
     """Initiate Microsoft authentication flow"""
     try:
-        # Generate the authorization URL
-        auth_url, state = graph_integration.get_auth_url()
+        print("Generating auth URL...")
+        # Generate the authorization URL with PKCE
+        auth_url, state, code_verifier = graph_integration.get_auth_url()
         
-        # Store the state in session for CSRF protection
+        # Store the state and code_verifier in session for CSRF and PKCE
         session['oauth_state'] = state
+        session['code_verifier'] = code_verifier
+        
+        print(f"Generated auth URL: {auth_url}")
+        print(f"State: {state}")
+        print(f"Code verifier (length): {len(code_verifier)}")
+        print(f"Session after storing state: {session}")
         
         # Return the auth URL - the frontend will redirect to this URL
         return jsonify({
@@ -143,6 +168,9 @@ def connect_microsoft():
         })
     except Exception as e:
         logger.error(f"Error initiating Microsoft auth: {str(e)}")
+        print(f"Detailed auth error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({
             'success': False,
             'error': str(e)
@@ -152,18 +180,35 @@ def connect_microsoft():
 def auth_callback():
     """Handle callback from Microsoft authentication"""
     try:
+        print("inside callback")
         # Get the code and state from query parameters
         code = request.args.get('code')
         state = request.args.get('state')
+        error = request.args.get('error')
+        error_description = request.args.get('error_description')
+        
+        # Print all query parameters for debugging
+        print(f"Auth callback query parameters: {dict(request.args)}")
+        print(f"Current session: {session}")
+        
+        # Check if there was an error
+        if error:
+            logger.error(f"Auth error: {error} - {error_description}")
+            return redirect(f"/?error={error}")
         
         # Verify state to prevent CSRF attacks
         if state != session.get('oauth_state'):
+            print(f"State mismatch: {state} vs {session.get('oauth_state')}")
             return redirect('/?error=invalid_state')
         
-        # Exchange code for token
-        result = graph_integration.handle_auth_callback(code)
+        # Get the code_verifier from session (may not be used in this flow)
+        code_verifier = session.get('code_verifier', 'not_used_in_this_flow')
         
-        if result['success']:
+        # Exchange code for token
+        result = graph_integration.handle_auth_callback(code, code_verifier)
+        print(f"Token exchange result: {result}")
+        
+        if result.get('success'):
             # Store user ID in session
             session['user_id'] = result['user_id']
             return redirect('/?auth=success')
@@ -171,6 +216,8 @@ def auth_callback():
             logger.error(f"Auth error: {result.get('error')} - {result.get('error_description')}")
             return redirect(f"/?error={result.get('error')}")
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         logger.error(f"Error in auth callback: {str(e)}")
         return redirect(f"/?error={str(e)}")
 

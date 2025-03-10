@@ -243,13 +243,20 @@ document.addEventListener('DOMContentLoaded', function() {
                 // Login
                 try {
                     addMessage("Connecting to Microsoft...", true);
+                    console.log("Requesting Microsoft auth URL...");
                     const response = await fetch('/connect-microsoft');
+                    console.log("Response received:", response);
                     const data = await response.json();
+                    console.log("Auth data:", data);
                     
                     if (data.success && data.auth_url) {
-                        // Redirect to Microsoft authorization page
-                        window.location.href = data.auth_url;
+                        console.log("Auth URL received, redirecting to:", data.auth_url);
+                        // Small delay to ensure logs are visible
+                        setTimeout(() => {
+                            window.location.href = data.auth_url;
+                        }, 100);
                     } else {
+                        console.error("Auth failed:", data);
                         addMessage("Sorry, there was a problem connecting to Microsoft. Please try again.");
                     }
                 } catch (error) {
