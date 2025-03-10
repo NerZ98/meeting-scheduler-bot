@@ -24,17 +24,24 @@ class DateTimeParser:
             r'night': lambda _: datetime.time(20, 0),
         }
         
-        # Common date patterns
+        # Common date patterns - IMPROVED WITH ADDITIONAL PATTERNS
         self.date_patterns = {
             r'today': self._parse_today,
             r'tomorrow': self._parse_tomorrow,
             r'day after tomorrow': self._parse_day_after_tomorrow,
             r'next (\w+)': self._parse_next_day,
             r'this (\w+)': self._parse_this_day,
-            r'(\d{1,2})(?:st|nd|rd|th)? (?:of\s+)?(\w+)(?:\s+(\d{4}))?': self._parse_day_month_year,
+            # Improved pattern to better catch "19th of March" style dates
+            r'(\d{1,2})(?:st|nd|rd|th)?(?:\s+of)?(?:\s+)(\w+)(?:\s+(\d{4}))?': self._parse_day_month_year,
+            # Added a more flexible pattern for the same format
+            r'(\d{1,2})(?:st|nd|rd|th)?(?:\s+)(\w+)(?:\s+(\d{4}))?': self._parse_day_month_year,
             r'(\w+) (\d{1,2})(?:st|nd|rd|th)?(?:\s+(\d{4}))?': self._parse_month_day_year,
             r'next week': self._parse_next_week,
             r'next month': self._parse_next_month,
+            # Add pattern for MM/DD/YYYY format
+            r'(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?': self._parse_slash_date,
+            # Add pattern for YYYY-MM-DD format
+            r'(\d{4})-(\d{1,2})-(\d{1,2})': self._parse_iso_date,
         }
         
         # Common duration patterns
@@ -171,7 +178,19 @@ class DateTimeParser:
         try:
             return datetime.date(year, month, day)
         except ValueError:
-            return None
+            # Day might be out of range for month, try to handle gracefully
+            try:
+                # Get the last day of the month
+                if month == 12:
+                    last_day = datetime.date(year + 1, 1, 1) - datetime.timedelta(days=1)
+                else:
+                    last_day = datetime.date(year, month + 1, 1) - datetime.timedelta(days=1)
+                
+                if day > last_day.day:
+                    return last_day
+                return None
+            except:
+                return None
     
     def _parse_month_day_year(self, match):
         month_name = match.group(1).lower()
@@ -204,6 +223,40 @@ class DateTimeParser:
         except ValueError:
             return None
     
+    # New method for parsing MM/DD/YYYY dates
+    def _parse_slash_date(self, match):
+        month = int(match.group(1))
+        day = int(match.group(2))
+        year_str = match.group(3)
+        
+        # Get year
+        if year_str:
+            year = int(year_str)
+            # Handle 2-digit years
+            if year < 100:
+                if year < 50:  # Assume 20xx for small years
+                    year += 2000
+                else:  # Assume 19xx for larger years
+                    year += 1900
+        else:
+            year = self.reference_date.year
+            
+        try:
+            return datetime.date(year, month, day)
+        except ValueError:
+            return None
+    
+    # New method for parsing YYYY-MM-DD dates
+    def _parse_iso_date(self, match):
+        year = int(match.group(1))
+        month = int(match.group(2))
+        day = int(match.group(3))
+        
+        try:
+            return datetime.date(year, month, day)
+        except ValueError:
+            return None
+    
     def _parse_next_week(self, _):
         # Return the same day next week
         return (self.reference_date + datetime.timedelta(weeks=1)).date()
@@ -218,17 +271,24 @@ class DateTimeParser:
             
         text = text.lower().strip()
         
+        # Debugging print to see what's being parsed
+        print(f"Parsing date from: '{text}'")
+        
         # Try each pattern
         for pattern, parser_func in self.date_patterns.items():
             match = re.search(pattern, text)
             if match:
-                return parser_func(match)
+                result = parser_func(match)
+                print(f"Matched pattern: {pattern}, Result: {result}")
+                return result
         
         # Fallback to dateutil parser
         try:
             parsed_date = parser.parse(text, fuzzy=True)
+            print(f"Dateutil fallback: {parsed_date.date()}")
             return parsed_date.date()
         except:
+            print(f"Failed to parse date: {text}")
             return None
     
     def parse_time(self, text):
@@ -237,18 +297,23 @@ class DateTimeParser:
             return None
             
         text = text.lower().strip()
+        print(f"Parsing time from: '{text}'")
         
         # Try each pattern
         for pattern, parser_func in self.time_patterns.items():
             match = re.search(pattern, text)
             if match:
-                return parser_func(match)
+                result = parser_func(match)
+                print(f"Matched time pattern: {pattern}, Result: {result}")
+                return result
         
         # Fallback to dateutil parser
         try:
             parsed_time = parser.parse(text, fuzzy=True)
+            print(f"Dateutil time fallback: {parsed_time.time()}")
             return parsed_time.time()
         except:
+            print(f"Failed to parse time: {text}")
             return None
     
     def parse_duration(self, text):

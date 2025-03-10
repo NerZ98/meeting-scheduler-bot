@@ -1,5 +1,7 @@
 import datetime
+import uuid
 from utils.date_parser import DateTimeParser
+import re
 
 class MeetingContext:
     """
@@ -27,45 +29,76 @@ class MeetingContext:
     
     def update_from_entities(self, entities):
         """Update the meeting context based on extracted entities"""
+        entity_updates = {}  # Track what was updated for debugging
+        
         if 'DATE' in entities and entities['DATE']:
-            # Take the last date mentioned
-            date_text = entities['DATE'][-1]
-            parsed_date = self.date_parser.parse_date(date_text)
-            if parsed_date:
-                self.date = parsed_date
-                print(f"Updated date to: {self.date}")
+            # Check if we have dates to process
+            for date_text in entities['DATE']:
+                if not date_text:
+                    continue
+                    
+                # Skip "it" or other common non-date references
+                if date_text.lower() in ['it', 'this', 'that']:
+                    continue
+                    
+                # Try to parse the date
+                parsed_date = self.date_parser.parse_date(date_text)
+                if parsed_date:
+                    self.date = parsed_date
+                    entity_updates['date'] = date_text
+                    print(f"Updated date to: {self.date} from '{date_text}'")
+                    break  # Take the first valid date
         
         if 'TIME' in entities and entities['TIME']:
             # Take the last time mentioned
-            time_text = entities['TIME'][-1]
-            parsed_time = self.date_parser.parse_time(time_text)
-            if parsed_time:
-                self.time = parsed_time
-                print(f"Updated time to: {self.time}")
+            for time_text in entities['TIME']:
+                if not time_text:
+                    continue
+                    
+                parsed_time = self.date_parser.parse_time(time_text)
+                if parsed_time:
+                    self.time = parsed_time
+                    entity_updates['time'] = time_text
+                    print(f"Updated time to: {self.time} from '{time_text}'")
+                    break  # Take the first valid time
         
         if 'DURATION' in entities and entities['DURATION']:
             # Take the last duration mentioned
-            duration_text = entities['DURATION'][-1]
-            parsed_duration = self.date_parser.parse_duration(duration_text)
-            if parsed_duration:
-                self.duration = parsed_duration
-                print(f"Updated duration to: {self.duration}")
+            for duration_text in entities['DURATION']:
+                if not duration_text:
+                    continue
+                    
+                parsed_duration = self.date_parser.parse_duration(duration_text)
+                if parsed_duration:
+                    self.duration = parsed_duration
+                    entity_updates['duration'] = duration_text
+                    print(f"Updated duration to: {self.duration} from '{duration_text}'")
+                    break  # Take the first valid duration
         
         if 'ATTENDEE' in entities and entities['ATTENDEE']:
+            # Reset attendees list to avoid duplicates when updating
+            self.attendees = []
+            
             # Clean and deduplicate attendees
             attendee_set = set()  # Use a set to avoid duplicates
             
             for attendee in entities['ATTENDEE']:
+                if not attendee:
+                    continue
+                    
                 # Split by commas, 'and', etc.
                 import re
                 
                 # First, clean up the attendee text
                 cleaned_attendee = attendee.lower()
                 
+                # Remove special tags like [sep]
+                cleaned_attendee = re.sub(r'\[.*?\]', ',', cleaned_attendee)
+                
                 # Filter out common non-attendee words and phrases
                 non_attendee_words = ['to this', 'to the', 'to our', 'for this', 'for the', 
-                                      'meeting', 'call', 'hour', 'minute', 'add', 'invite', 
-                                      'include', 'with', 'and add', 'and include']
+                                    'meeting', 'call', 'hour', 'minute', 'add', 'invite', 
+                                    'include', 'with', 'and add', 'and include']
                 
                 for word in non_attendee_words:
                     cleaned_attendee = cleaned_attendee.replace(word, ',')
@@ -75,15 +108,30 @@ class MeetingContext:
                 
                 for person in attendee_list:
                     person = person.strip()
-                    if person and len(person) > 1:  # Avoid single character names or empty strings
-                        # Capitalize the first letter of each name
-                        capitalized_name = person.capitalize()
+                    if not person or len(person) <= 1:  # Skip empty names or single characters
+                        continue
+                        
+                    # Check if this is likely a full name
+                    name_parts = person.split()
+                    
+                    # Only process if there's at least one part
+                    if name_parts:
+                        # If it's a full name, capitalize each part
+                        if len(name_parts) > 1:
+                            # Capitalize each part of the name
+                            capitalized_name = ' '.join(part.capitalize() for part in name_parts)
+                        else:
+                            # Just a single name
+                            capitalized_name = name_parts[0].capitalize()
+                        
+                        # Add to our set if it's not already there
                         if capitalized_name not in attendee_set:
                             attendee_set.add(capitalized_name)
                             print(f"Added attendee: {capitalized_name}")
             
             # Update the attendees list with the deduplicated set
             self.attendees = list(attendee_set)
+            entity_updates['attendees'] = self.attendees
                         
         # Check for time in text if TIME entity not detected
         # This is a fallback mechanism
@@ -97,6 +145,40 @@ class MeetingContext:
                 if "hour" in value.lower() and not self.duration:
                     self.duration = 60  # 1 hour in minutes
                     print(f"Fallback: Updated duration to: {self.duration}")
+        
+        # Debug output
+        if entity_updates:
+            print(f"Updated entities: {entity_updates}")
+            
+        return entity_updates
+    
+    def _process_raw_text(self, text, already_updated):
+        """
+        Process raw text for additional entities that might have been missed
+        by the NER model. This is a fallback mechanism.
+        """
+        text = text.lower()
+        
+        # Only attempt date extraction if not already found
+        if 'date' not in already_updated and self.date is None:
+            # Look for date patterns in the raw text
+            # Common date formats to try
+            date_patterns = [
+                r'(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|may|june|july|august|september|october|november|december)',
+                r'(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:st|nd|rd|th)?',
+                r'(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?'
+            ]
+            
+            for pattern in date_patterns:
+                match = re.search(pattern, text)
+                if match:
+                    # Try to parse with date_parser
+                    matched_text = match.group(0)
+                    parsed_date = self.date_parser.parse_date(matched_text)
+                    if parsed_date:
+                        self.date = parsed_date
+                        print(f"Fallback: Updated date to: {self.date} from '{matched_text}'")
+                        break
     
     def is_complete(self):
         """Check if all required information is provided"""

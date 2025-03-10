@@ -252,6 +252,47 @@ class EntityRecognitionModel:
         f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
         return f1
     
+    def _enhance_date_extraction(self, text, entities):
+        """
+        Enhance date extraction with rule-based patterns
+        """
+        # Only try to enhance if we don't already have DATE entities
+        if 'DATE' not in entities or not entities['DATE']:
+            # Common date patterns to look for
+            date_patterns = [
+                # Match "19th of March", "19 March", etc.
+                r'(\d{1,2})(?:st|nd|rd|th)?(?:\s+of)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|may|june|july|august|september|october|november|december)',
+                # Match "March 19th", "March 19", etc.
+                r'(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:st|nd|rd|th)?',
+                # Match MM/DD or MM/DD/YYYY
+                r'(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?',
+                # Match YYYY-MM-DD
+                r'(\d{4})-(\d{1,2})-(\d{1,2})'
+            ]
+            
+            text_lower = text.lower()
+            
+            # Try each pattern
+            for pattern in date_patterns:
+                matches = re.findall(pattern, text_lower)
+                if matches:
+                    # Extract the full matched text
+                    match_obj = re.search(pattern, text_lower)
+                    if match_obj:
+                        date_text = match_obj.group(0)
+                        
+                        # Try to parse this with a date parser to validate it
+                        # For this simple enhancement, we'll just assume it's valid
+                        if 'DATE' not in entities:
+                            entities['DATE'] = []
+                        
+                        # Add this date text to our entities
+                        entities['DATE'].append(date_text)
+                        print(f"Enhanced date extraction: Found '{date_text}'")
+                        break  # Stop after finding one date
+        
+        return entities
+    
     def predict(self, text):
         if self.model is None:
             raise ValueError("Model not initialized. Please train or load a model first.")
@@ -287,32 +328,44 @@ class EntityRecognitionModel:
             matches = re.finditer(pattern, text, re.IGNORECASE)
             for match in matches:
                 duration_entities.append(formatter(match))
-                
+        
         # Attendee extraction - look for common patterns for adding people
         attendee_entities = []
         
+        # Clean any previous text to avoid common pitfalls
+        text_for_attendees = re.sub(r'\[.*?\]', ' ', text.lower())  # Remove [sep] and similar tags
+        
         # Check for "add X and Y" pattern
         add_pattern = r'add\s+([\w\s,]+)(?:to|for|into|in)?\s*(?:the|this|our)?\s*(?:meeting|call)'
-        add_match = re.search(add_pattern, text.lower())
+        add_match = re.search(add_pattern, text_for_attendees)
         if add_match:
             attendee_text = add_match.group(1).strip()
-            attendee_entities.append(attendee_text)
+            if attendee_text and attendee_text not in attendee_entities:
+                attendee_entities.append(attendee_text)
             
         # Check for "with X and Y" pattern
         with_pattern = r'(?:with|include|invite)\s+([\w\s,]+)(?:to|for|into|in)?\s*(?:the|this|our)?\s*(?:meeting|call)?'
-        with_match = re.search(with_pattern, text.lower())
+        with_match = re.search(with_pattern, text_for_attendees)
         if with_match:
             attendee_text = with_match.group(1).strip()
-            attendee_entities.append(attendee_text)
+            if attendee_text and attendee_text not in attendee_entities:
+                attendee_entities.append(attendee_text)
             
         # Check for names separated by "and" or commas not part of above patterns
         if "and" in text:
-            potential_name_pattern = r'\b([A-Z][a-z]+)\s+and\s+([A-Z][a-z]+)\b'
+            # Look for capitalized names (more likely to be proper names)
+            potential_name_pattern = r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+and\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b'
             name_matches = re.finditer(potential_name_pattern, text)
             for match in name_matches:
-                potential_name = f"{match.group(1)} and {match.group(2)}"
-                if potential_name not in attendee_entities:
-                    attendee_entities.append(potential_name)
+                # Extract full names with first and last names
+                name1 = match.group(1).strip()
+                name2 = match.group(2).strip()
+                
+                # Add each name separately for better processing
+                if name1 and name1 not in attendee_entities:
+                    attendee_entities.append(name1)
+                if name2 and name2 not in attendee_entities:
+                    attendee_entities.append(name2)
         
         # Tokenize for BERT
         encoding = self.tokenizer.encode_plus(
@@ -426,6 +479,36 @@ class EntityRecognitionModel:
             if keyword in text.lower() and 'DATE' not in entities:
                 entities['DATE'] = [keyword]
                 break
+        
+        # Enhanced date extraction with more patterns
+        entities = self._enhance_date_extraction(text, entities)
+        
+        # Apply additional date pattern matching for specific formats
+        if 'DATE' not in entities or not entities['DATE']:
+            # Match "19th of March", "19 March", "March 19th" type formats
+            date_patterns = [
+                # DD Month [YYYY]
+                r'(\d{1,2})(?:st|nd|rd|th)?(?:\s+of)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|may|june|july|august|september|october|november|december)(?:\s+\d{4})?',
+                # Month DD [YYYY]
+                r'(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s+\d{4})?',
+                # MM/DD[/YYYY]
+                r'(\d{1,2})/(\d{1,2})(?:/\d{2,4})?',
+                # YYYY-MM-DD
+                r'\d{4}-\d{1,2}-\d{1,2}'
+            ]
+            
+            for pattern in date_patterns:
+                match = re.search(pattern, text.lower())
+                if match:
+                    date_text = match.group(0)
+                    if 'DATE' not in entities:
+                        entities['DATE'] = []
+                    entities['DATE'].append(date_text)
+                    print(f"Pattern match: Found date '{date_text}'")
+                    break
+        
+        # Print summary for debugging
+        print(f"Extracted entities: {entities}")
         
         return entities
     
