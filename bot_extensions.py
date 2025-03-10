@@ -196,10 +196,14 @@ class MeetingSchedulerWithGraphAPI:
             # Convert attendee names to emails
             attendee_emails = []
             for attendee in meeting_context.attendees:
-                # In a real app, you'd look up emails from your system or a directory
-                # This is a simplified placeholder approach
-                attendee_email = f"{attendee.lower().replace(' ', '.')}@biz4solutions.com"
-                attendee_emails.append(attendee_email)
+                # Check if we have a resolved email for this attendee
+                if hasattr(meeting_context, 'attendee_emails') and attendee in meeting_context.attendee_emails:
+                    email = meeting_context.attendee_emails[attendee]
+                    attendee_emails.append(email)
+                else:
+                    # This is a placeholder - in a real app, you'd look up emails from your system or a directory
+                    email = f"{attendee.lower().replace(' ', '.')}@biz4solutions.com"
+                    attendee_emails.append(email)
             
             # Convert date and time to ISO format
             date_string = meeting_context.date.isoformat()
@@ -292,6 +296,11 @@ class MeetingSchedulerWithGraphAPI:
             # Default to 30 minutes
             duration_minutes = 30
         
+        # Get attendee emails if available
+        attendee_emails = {}
+        if hasattr(meeting_context, 'attendee_emails'):
+            attendee_emails = meeting_context.attendee_emails
+        
         # Prepare the meeting data
         meeting_data = {
             'title': meeting_context.title,
@@ -299,13 +308,100 @@ class MeetingSchedulerWithGraphAPI:
             'date': date_string,
             'time': time_string,
             'duration_minutes': duration_minutes,
-            'attendees': meeting_context.attendees
+            'attendees': meeting_context.attendees,
+            'attendee_emails': attendee_emails
         }
         
         # Debug print
         self.logger.info(f"DEBUG: Built meeting data: {json.dumps(meeting_data, default=str)}")
         
         return meeting_data
+    
+    def create_meeting(self, user_id, meeting_data):
+        """
+        Create a meeting in the user's calendar
+        
+        Parameters:
+        - user_id: User's ID (from token)
+        - meeting_data: Dictionary with meeting details
+        
+        Returns:
+        - Meeting object from Graph API
+        """
+        # Debug logging
+        self.logger.info(f"DEBUG: create_meeting called with user_id: {user_id}")
+        self.logger.info(f"DEBUG: meeting_data received: {json.dumps(meeting_data, default=str)}")
+        
+        # Format the meeting data for Microsoft Graph
+        start_time = f"{meeting_data['date']}T{meeting_data['time']}"
+        self.logger.info(f"DEBUG: Formatted start_time: {start_time}")
+        
+        # Calculate end time based on duration (in minutes)
+        start_datetime = datetime.datetime.fromisoformat(start_time)
+        duration_minutes = meeting_data.get('duration_minutes', 30)  # Default to 30 minutes
+        end_datetime = start_datetime + datetime.timedelta(minutes=duration_minutes)
+        end_time = end_datetime.isoformat()
+        self.logger.info(f"DEBUG: Calculated end_time: {end_time}")
+        
+        # Format attendees using resolved emails if available
+        attendees = []
+        attendee_emails = meeting_data.get('attendee_emails', {})
+        
+        for attendee in meeting_data.get('attendees', []):
+            # Check if we have a resolved email for this attendee
+            if attendee in attendee_emails:
+                email = attendee_emails[attendee]
+            elif '@' in attendee:
+                # The attendee name itself is an email
+                email = attendee
+            else:
+                # Fall back to the default format if no resolved email is available
+                email = f"{attendee.lower().replace(' ', '.')}@biz4solutions.com"
+            
+            attendees.append({
+                "emailAddress": {
+                    "address": email,
+                    "name": attendee
+                },
+                "type": "required"
+            })
+        
+        # Create event object
+        event = {
+            "subject": meeting_data.get('title', 'Meeting'),
+            "body": {
+                "contentType": "HTML",
+                "content": meeting_data.get('description', '')
+            },
+            "start": {
+                "dateTime": start_time,
+                "timeZone": "India Standard Time"  # Using IST timezone
+            },
+            "end": {
+                "dateTime": end_time,
+                "timeZone": "India Standard Time"  # Using IST timezone
+            },
+            "location": {
+                "displayName": meeting_data.get('location', '')
+            },
+            "attendees": attendees,
+            "isOnlineMeeting": True,
+            "onlineMeetingProvider": "teamsForBusiness"
+        }
+        
+        # Debug logging
+        self.logger.info(f"DEBUG: Final event object: {json.dumps(event, default=str)}")
+        
+        # Check token before making the request
+        token = self.graph_client.get_token_for_user(user_id)
+        if not token:
+            self.logger.error(f"DEBUG: No valid token available for user_id: {user_id}")
+        else:
+            self.logger.info(f"DEBUG: Valid token found for user_id: {user_id} (truncated): {token[:10]}...")
+        
+        # Make the API call (use /me endpoint with delegated permissions)
+        endpoint = "me/events"
+        return self.graph_client.make_request("post", endpoint, event, user_id)
     
     def _save_meeting_id_map(self):
         """Save the meeting ID map to a file for persistence"""

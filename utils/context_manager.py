@@ -18,6 +18,7 @@ class MeetingContext:
         self.time = None
         self.duration = None
         self.attendees = []
+        self.attendee_emails = {}  # Store resolved emails for attendees
         self.title = "Meeting"
         self.description = ""
         self.is_confirmed = False
@@ -188,6 +189,8 @@ class MeetingContext:
             len(self.attendees) > 0
         )
     
+# In MeetingContext class (context_manager.py)
+
     def get_missing_info(self):
         """Get a list of missing required information"""
         missing = []
@@ -197,6 +200,9 @@ class MeetingContext:
         
         if self.time is None:
             missing.append("time")
+        
+        if self.duration is None:
+            missing.append("duration") 
         
         if not self.attendees:
             missing.append("attendees")
@@ -210,6 +216,7 @@ class MeetingContext:
             'time': self.date_parser.format_time(self.time) if self.time else None,
             'duration': self.date_parser.format_duration(self.duration) if self.duration else None,
             'attendees': self.attendees,
+            'attendee_emails': self.attendee_emails,
             'title': self.title,
             'description': self.description,
             'is_confirmed': self.is_confirmed,

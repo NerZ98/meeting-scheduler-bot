@@ -4,6 +4,7 @@ import re
 from utils.context_manager import MeetingContext
 from bot.response_generator import ResponseGenerator
 from utils.date_parser import DateTimeParser
+from attendee_resolver import AttendeeResolver
 
 class ConversationState:
     """
@@ -16,9 +17,15 @@ class ConversationState:
         self.conversation_history = []
         self.last_intent = None
         self.waiting_for = None  # What information we're waiting for from the user
-        self.change_mode = None  # Add this line to initialize change_mode
+        self.change_mode = None  # What we're changing in change mode
         self.response_generator = ResponseGenerator()
         self.date_parser = DateTimeParser()  # Add a date parser instance for direct extraction
+        
+        # Attendee resolution
+        self.attendee_resolver = AttendeeResolver()
+        self.disambiguation_session = None  # Track active disambiguation session
+        self.pending_attendees = []  # Store attendees waiting for resolution
+        self.resolved_attendees = []  # Store resolved attendees
         
     def start_new_meeting(self):
         """Start a new meeting context"""
@@ -37,6 +44,135 @@ class ConversationState:
             return self.start_new_meeting()
         
         return self.meetings.get(self.current_meeting_id)
+    
+    def handle_attendee_disambiguation(self, user_message):
+        """
+        Handle disambiguation for attendees with multiple possible email matches
+        Returns a response message and True if the message was handled, False otherwise
+        """
+        if not self.disambiguation_session:
+            return None, False
+        
+        # Check if the user input is a number
+        try:
+            selection = int(user_message.strip())
+            # Adjust to 0-based index
+            selection -= 1
+            
+            # Process the selection
+            result = self.attendee_resolver.resolve_disambiguation_selection(
+                self.disambiguation_session['session_id'], 
+                selection
+            )
+            
+            if result['status'] == 'error':
+                return f"Error: {result['message']}. Please try again.", True
+            
+            if result['status'] == 'completed':
+                # All ambiguous attendees have been resolved
+                self.resolved_attendees.extend(result['resolved_attendees'])
+                
+                # Update the meeting attendees
+                meeting = self.get_current_meeting()
+                
+                # Update attendee list with resolved names
+                updated_attendees = []
+                
+                # Add previously resolved attendees
+                for attendee in meeting.attendees:
+                    # Check if this is a pending attendee
+                    if attendee not in self.pending_attendees:
+                        updated_attendees.append(attendee)
+                
+                # Add newly resolved attendees
+                for name, email in self.resolved_attendees:
+                    # Store the resolved email in the attendee object
+                    meeting.attendee_emails[name] = email
+                    updated_attendees.append(name)
+                
+                meeting.attendees = updated_attendees
+                
+                # Clear disambiguation state
+                self.disambiguation_session = None
+                self.pending_attendees = []
+                self.resolved_attendees = []
+                
+                # Show confirmation
+                if meeting.is_complete():
+                    return self._generate_confirmation_message(meeting), True
+                else:
+                    # Check if anything else is missing
+                    missing = meeting.get_missing_info()
+                    if missing:
+                        missing_str = ", ".join(missing)
+                        return f"Attendees added. I still need the following details: {missing_str.capitalize()}.", True
+                    else:
+                        return "Attendees added. What else would you like to add to this meeting?", True
+            
+            if result['status'] == 'in_progress':
+                # Continue with the next ambiguous attendee
+                self.disambiguation_session = result
+                
+                # Generate the options message
+                options_message = self.attendee_resolver.format_disambiguation_options(
+                    result['current_name'],
+                    result['options']
+                )
+                
+                return options_message, True
+        
+        except ValueError:
+            # Not a number, maybe user wants to cancel disambiguation
+            if user_message.lower() in ['cancel', 'stop', 'exit']:
+                if self.disambiguation_session:
+                    self.attendee_resolver.cancel_disambiguation_session(
+                        self.disambiguation_session['session_id']
+                    )
+                    self.disambiguation_session = None
+                    self.pending_attendees = []
+                    self.resolved_attendees = []
+                    
+                    return "Attendee selection cancelled. What would you like to do?", True
+            
+            return "Please enter a number to select an attendee, or 'cancel' to stop.", True
+        
+        return None, False
+    
+    def resolve_attendees(self, meeting, attendee_names):
+        """
+        Resolve attendee names to email addresses
+        Returns True if all attendees were resolved, False if disambiguation is needed
+        Returns a tuple of (success, message) if there are attendees not found in the database
+        """
+        # Try to resolve the attendees
+        resolved, ambiguous, not_found = self.attendee_resolver.resolve_attendees(attendee_names)
+        
+        # If we have attendees not found in the database, return error message
+        if not_found:
+            not_found_names = ", ".join(not_found)
+            error_message = f"I couldn't find the following attendee(s) in the organization: {not_found_names}. Please choose employees from your organization only."
+            return (False, error_message)
+        
+        # Add resolved attendees to the meeting
+        for name, email in resolved:
+            # Check if already in the list
+            if name not in meeting.attendees:
+                meeting.attendees.append(name)
+            
+            # Store the email
+            meeting.attendee_emails[name] = email
+        
+        # If we have ambiguous attendees, start disambiguation
+        if ambiguous:
+            # Store the ambiguous attendees for later
+            self.pending_attendees = list(ambiguous.keys())
+            
+            # Start disambiguation session
+            self.disambiguation_session = self.attendee_resolver.start_disambiguation_session(ambiguous)
+            
+            return (False, None)  # No error message, but we need disambiguation
+        
+        return (True, None)  # All resolved successfully
     
     def _extract_date_from_message(self, meeting, message):
         """
@@ -86,6 +222,12 @@ class ConversationState:
         Handle an intent and update the state accordingly
         Returns a response message
         """
+        # Check if we're in disambiguation mode
+        if self.disambiguation_session:
+            response, handled = self.handle_attendee_disambiguation(user_message)
+            if handled:
+                return response
+        
         print(f"Handling intent: {intent}")
         print(f"Entities extracted: {entities}")
         print(f"User message: {user_message}")
@@ -96,6 +238,27 @@ class ConversationState:
         # Handling restart and change scenarios
         restart_phrases = ['nope', 'no', 'not correct', 'start over', 'reset', 'cancel']
         confirmation_phrases = ['yes', 'confirm', 'ok', 'okay']
+        
+        # Direct duration extraction - catch "Make the duration 2 hours"
+        if "DURATION" in entities and entities["DURATION"]:
+            duration_text = entities["DURATION"][0]
+            parsed_duration = self.date_parser.parse_duration(duration_text)
+            if parsed_duration:
+                meeting.duration = parsed_duration
+                duration_str = meeting.date_parser.format_duration(parsed_duration)
+                response = f"Duration set to {duration_str}."
+                
+                # Check if meeting is now complete
+                if meeting.is_complete():
+                    response += "\n\n" + self._generate_confirmation_message(meeting)
+                else:
+                    # Show what's still missing
+                    missing = meeting.get_missing_info()
+                    if missing:
+                        missing_str = ", ".join(missing)
+                        response += f"\n\nI still need the following details: {missing_str.capitalize()}."
+                
+                return response
 
         # Check if we're in change mode
         if self.change_mode:
@@ -106,7 +269,8 @@ class ConversationState:
                 if parsed_date:
                     meeting.date = parsed_date
                     self.change_mode = None
-                    response = f"Date changed to {self.date_parser.format_date(parsed_date)}."
+                    date_str = meeting.date.strftime("%A, %B %d, %Y")
+                    response = f"Date changed to {date_str}."
                     
                     # Do NOT automatically generate confirmation
                     return response
@@ -142,6 +306,31 @@ class ConversationState:
             elif self.change_mode == 'attendees':
                 # Update attendees
                 meeting.update_from_entities({'ATTENDEE': [user_message]})
+                
+                # Resolve attendees to emails
+                attendee_names = meeting.attendees
+                result = self.resolve_attendees(meeting, attendee_names)
+                
+                # Check if we got a tuple result (indicating potential error)
+                if isinstance(result, tuple):
+                    success, message = result
+                    
+                    # If there's an error message, return it (don't change mode yet)
+                    if not success and message is not None:
+                        return message
+                        
+                    # Otherwise, if disambiguation is needed
+                    if not success and self.disambiguation_session:
+                        # Exit change mode as we're now in disambiguation mode
+                        self.change_mode = None
+                        # We have ambiguous attendees, show disambiguation options
+                        options_message = self.attendee_resolver.format_disambiguation_options(
+                            self.disambiguation_session['current_name'],
+                            self.disambiguation_session['options']
+                        )
+                        return options_message
+                
+                # All resolved successfully
                 self.change_mode = None
                 response = f"Attendees updated to: {', '.join(meeting.attendees)}."
                 
@@ -189,7 +378,9 @@ class ConversationState:
                 meeting.is_confirmed = True
                 return "✅ Meeting scheduled successfully!"
             else:
-                return "The meeting is not complete. Please provide all details first."
+                missing = meeting.get_missing_info()
+                missing_str = ", ".join(missing)
+                return f"The meeting is not complete. Please provide these missing details: {missing_str.capitalize()}."
         
         if intent == "Schedule_Meeting":
             # Start new meeting if needed
@@ -203,53 +394,109 @@ class ConversationState:
             meeting.update_from_entities(entities)
             meeting.last_update = "intent"
             
-            # When scheduling with complete time info, prepare a better response
-            has_time = 'TIME' in entities and entities['TIME']
-            has_date = 'DATE' in entities and entities['DATE']
-            has_duration = 'DURATION' in entities and entities['DURATION']
-            
-            # Additional check for date in the original message
-            date_mentioned = meeting.date is not None
-            
-            if has_time and date_mentioned:
-                # The user provided both date and time in the scheduling request
-                response = f"I'll schedule a meeting for {meeting.date_parser.format_date(meeting.date)} at {meeting.date_parser.format_time(meeting.time)}."
+            # If attendees were provided, resolve them immediately
+            if 'ATTENDEE' in entities and entities['ATTENDEE'] and meeting.attendees:
+                result = self.resolve_attendees(meeting, meeting.attendees)
                 
-                if has_duration:
-                    response += f" The meeting will last for {meeting.date_parser.format_duration(meeting.duration)}."
-                
-                # Check what's missing
-                missing = meeting.get_missing_info()
-                if "attendees" in missing:
-                    self.waiting_for = "attendees"
-                    response += "\n\n" + self.response_generator.get_attendee_request()
-                else:
-                    # We have all required info, but do not auto-confirm
-                    response += "\n\n" + self._generate_confirmation_message(meeting)
-                
-                return response
+                # Check if we got a tuple result (indicating potential error)
+                if isinstance(result, tuple):
+                    success, message = result
+                    
+                    # If there's an error message, return it
+                    if not success and message is not None:
+                        return message
+                        
+                    # Otherwise, if disambiguation is needed
+                    if not success and self.disambiguation_session:
+                        # We have ambiguous attendees, show disambiguation options
+                        options_message = self.attendee_resolver.format_disambiguation_options(
+                            self.disambiguation_session['current_name'],
+                            self.disambiguation_session['options']
+                        )
+                        return options_message
             
-            # Otherwise, handle missing information
+            # Get missing info after updating
             missing = meeting.get_missing_info()
             
+            # Prepare a clear and concise response that acknowledges what's been set
+            # and asks for what's still needed
+            response_parts = []
+            
+            # Acknowledge what's been set
+            if meeting.date:
+                date_str = meeting.date.strftime("%A, %B %d, %Y")
+                response_parts.append(f"I'll schedule a meeting for {date_str}")
+            
+            if meeting.time:
+                time_str = meeting.date_parser.format_time(meeting.time)
+                if response_parts:
+                    response_parts[0] += f" at {time_str}"
+                else:
+                    response_parts.append(f"I'll schedule a meeting at {time_str}")
+            
+            if meeting.duration:
+                duration_str = meeting.date_parser.format_duration(meeting.duration)
+                response_parts.append(f"The meeting will last {duration_str}")
+            
+            if meeting.attendees:
+                attendee_str = ", ".join(meeting.attendees)
+                response_parts.append(f"Attendees: {attendee_str}")
+            
+            # Combine what we know so far
+            if response_parts:
+                response = ". ".join(response_parts) + "."
+            else:
+                response = "I'll help you schedule a meeting."
+            
+            # Ask for what's missing
             if "date" in missing:
                 self.waiting_for = "date"
-                return "On what date would you like to schedule the meeting?"
+                return f"{response}\n\nWhat date would you like to schedule this meeting for?"
+            
             elif "time" in missing:
                 self.waiting_for = "time"
-                return self.response_generator.get_time_request()
+                return f"{response}\n\nWhat time would work for the meeting?"
+                
+            elif "duration" in missing:
+                self.waiting_for = "duration"
+                return f"{response}\n\nHow long should the meeting last?"
+            
             elif "attendees" in missing:
                 self.waiting_for = "attendees"
-                return self.response_generator.get_attendee_request()
-            else:
-                # We have all required info
-                return self._generate_confirmation_message(meeting)
+                return f"{response}\n\nWho would you like to invite to this meeting?"
+            
+            # If we have all required info, show confirmation
+            return self._generate_confirmation_message(meeting)
         
-        # Rest of the existing method for other intents remains the same
         elif intent == "Add_Attendee":
             # Update attendees
             meeting.update_from_entities(entities)
             meeting.last_update = "attendees"
+            
+            # Resolve attendees to emails
+            if 'ATTENDEE' in entities and entities['ATTENDEE']:
+                attendee_names = meeting.attendees
+                
+                # If disambiguation is needed, it will start a session
+                result = self.resolve_attendees(meeting, attendee_names)
+                
+                # Check if we got a tuple result (indicating potential error)
+                if isinstance(result, tuple):
+                    success, message = result
+                    
+                    # If there's an error message, return it
+                    if not success and message is not None:
+                        return message
+                        
+                    # Otherwise, if disambiguation is needed
+                    if not success and self.disambiguation_session:
+                        # We have ambiguous attendees, show disambiguation options
+                        options_message = self.attendee_resolver.format_disambiguation_options(
+                            self.disambiguation_session['current_name'],
+                            self.disambiguation_session['options']
+                        )
+                        
+                        return options_message
             
             # Direct fallback for attendee extraction if the entity model fails
             if not entities.get('ATTENDEE') and self.waiting_for == "attendees":
@@ -264,28 +511,43 @@ class ConversationState:
                 potential_names = [word for word in words if word not in stop_words]
                 
                 if potential_names:
+                    potential_attendees = []
                     for name in potential_names:
                         # Capitalize the first letter of each name
                         name = name.strip().capitalize()
-                        if name and name not in meeting.attendees:
-                            meeting.attendees.append(name)
-                            print(f"Fallback: Added attendee: {name}")
+                        if name and len(name) > 1:
+                            potential_attendees.append(name)
+                    
+                    if potential_attendees:
+                        # Try to resolve these potential names
+                        result = self.resolve_attendees(meeting, potential_attendees)
+                        
+                        # Check for errors
+                        if isinstance(result, tuple):
+                            success, message = result
+                            if not success and message is not None:
+                                return message
             
             # Check if this completes the meeting info
             if meeting.is_complete():
                 return self._generate_confirmation_message(meeting)
             else:
                 missing = meeting.get_missing_info()
+                missing_str = ", ".join(missing)
+                response = f"Attendees added. "
+                
                 if "time" in missing:
                     self.waiting_for = "time"
-                    return "What time should I schedule the meeting for?"
+                    return f"{response}What time should I schedule the meeting for?"
                 elif "date" in missing:
                     self.waiting_for = "date"
-                    return "On what date should I schedule this meeting?"
+                    return f"{response}What date should I schedule this meeting for?"
+                elif "duration" in missing:
+                    self.waiting_for = "duration"
+                    return f"{response}How long should the meeting last?"
                 else:
-                    return "Attendees added. Is there anything else you'd like to add?"
+                    return f"{response}I still need the following details: {missing_str.capitalize()}."
         
-        # Other intent handlers remain the same...
         elif intent == "Change_Time":
             # Update time
             meeting.update_from_entities(entities)
@@ -298,12 +560,213 @@ class ConversationState:
                 # If meeting is otherwise complete, show confirmation
                 if meeting.is_complete():
                     response += "\n" + self._generate_confirmation_message(meeting)
+                else:
+                    missing = meeting.get_missing_info()
+                    missing_str = ", ".join(missing)
+                    response += f"\nI still need the following details: {missing_str.capitalize()}."
                 return response
             else:
                 self.waiting_for = "time"
                 return "What time would you like to change it to?"
         
-        # Rest of the intent handlers stay the same
+        elif intent == "Change_Date":
+            # Update date
+            meeting.update_from_entities(entities)
+            meeting.last_update = "date"
+            
+            if "DATE" in entities and entities["DATE"]:
+                if meeting.date:
+                    date_str = meeting.date.strftime("%A, %B %d, %Y")
+                    response = f"No problem. Date changed to {date_str}."
+                else:
+                    response = "I couldn't parse that date. Please try a different format."
+                    
+                # If meeting is otherwise complete, show confirmation
+                if meeting.is_complete():
+                    response += "\n" + self._generate_confirmation_message(meeting)
+                else:
+                    missing = meeting.get_missing_info()
+                    missing_str = ", ".join(missing)
+                    response += f"\nI still need the following details: {missing_str.capitalize()}."
+                return response
+            else:
+                self.waiting_for = "date"
+                return "What date would you like to change it to?"
+        
+        elif intent == "Change_Duration":
+            # Update duration
+            meeting.update_from_entities(entities)
+            meeting.last_update = "duration"
+            
+            if "DURATION" in entities and entities["DURATION"]:
+                duration_str = meeting.date_parser.format_duration(meeting.duration)
+                response = f"No problem. Duration changed to {duration_str}."
+                
+                # If meeting is otherwise complete, show confirmation
+                if meeting.is_complete():
+                    response += "\n" + self._generate_confirmation_message(meeting)
+                else:
+                    missing = meeting.get_missing_info()
+                    missing_str = ", ".join(missing)
+                    response += f"\nI still need the following details: {missing_str.capitalize()}."
+                return response
+            else:
+                self.waiting_for = "duration"
+                return "How long should the meeting be?"
+        
+        elif intent == "Cancel_Meeting":
+            # Mark the meeting as cancelled
+            meeting.is_cancelled = True
+            meeting.is_confirmed = False
+            
+            return "Meeting cancelled."
+        
+        elif intent == "Get_Meeting_Info":
+            # Check if we have a meeting to show
+            if not meeting.date and not meeting.time and not meeting.attendees:
+                return "I don't have any meeting details yet. Would you like to schedule a meeting?"
+            
+            return self._generate_confirmation_message(meeting)
+        
+        # Process other intents or fallback
+        # Depending on what we're waiting for, try to extract relevant info
+        if self.waiting_for:
+            if self.waiting_for == "date":
+                # Try to extract date from the message
+                if self._extract_date_from_message(meeting, user_message):
+                    self.waiting_for = None
+                    
+                    # Build response acknowledging the date
+                    date_str = meeting.date.strftime("%A, %B %d, %Y")
+                    response = f"Great! I've set the date to {date_str}."
+                    
+                    # If we still need information, ask for it
+                    missing = meeting.get_missing_info()
+                    if "time" in missing:
+                        self.waiting_for = "time"
+                        return f"{response}\n\nWhat time would work for this meeting?"
+                    elif "duration" in missing:
+                        self.waiting_for = "duration"
+                        return f"{response}\n\nHow long should the meeting last?"
+                    elif "attendees" in missing:
+                        self.waiting_for = "attendees"
+                        return f"{response}\n\nWho would you like to invite to this meeting?"
+                    else:
+                        # We have all required info
+                        return self._generate_confirmation_message(meeting)
+                else:
+                    date_examples = "Examples: tomorrow, next Monday, March 15, etc."
+                    return f"I still need a date for the meeting. {date_examples}"
+            
+            elif self.waiting_for == "time":
+                # Try to extract time directly
+                try:
+                    parsed_time = self.date_parser.parse_time(user_message)
+                    if parsed_time:
+                        meeting.time = parsed_time
+                        self.waiting_for = None
+                        
+                        # Build response acknowledging the time
+                        time_str = meeting.date_parser.format_time(parsed_time)
+                        response = f"Great! I've set the time to {time_str}."
+                        
+                        # Check what's missing now
+                        missing = meeting.get_missing_info()
+                        if "date" in missing:
+                            self.waiting_for = "date"
+                            return f"{response}\n\nWhat date would you like to schedule this meeting for?"
+                        elif "duration" in missing:
+                            self.waiting_for = "duration"
+                            return f"{response}\n\nHow long should the meeting last?"
+                        elif "attendees" in missing:
+                            self.waiting_for = "attendees"
+                            return f"{response}\n\nWho would you like to invite to this meeting?"
+                        else:
+                            # We have all required info
+                            return self._generate_confirmation_message(meeting)
+                except:
+                    pass
+                
+                time_examples = "Examples: 2pm, 14:30, 3 o'clock, etc."
+                return f"I still need a time for the meeting. {time_examples}"
+                
+            elif self.waiting_for == "duration":
+                # Try to parse duration
+                parsed_duration = self.date_parser.parse_duration(user_message)
+                if parsed_duration:
+                    meeting.duration = parsed_duration
+                    self.waiting_for = None
+                        
+                    # Build response acknowledging the duration
+                    duration_str = meeting.date_parser.format_duration(parsed_duration)
+                    response = f"Great! I've set the duration to {duration_str}."
+                        
+                    # Check what's missing now
+                    missing = meeting.get_missing_info()
+                    if "date" in missing:
+                        self.waiting_for = "date"
+                        return f"{response}\n\nWhat date would you like to schedule this meeting for?"
+                    elif "time" in missing:
+                        self.waiting_for = "time"
+                        return f"{response}\n\nWhat time would work for this meeting?"
+                    elif "attendees" in missing:
+                        self.waiting_for = "attendees"
+                        return f"{response}\n\nWho would you like to invite to this meeting?"
+                    else:
+                        # We have all required info
+                        return self._generate_confirmation_message(meeting)
+                    
+                duration_examples = "Examples: 30 minutes, 1 hour, 45 mins, etc."
+                return f"I still need a duration for the meeting. {duration_examples}"
+            
+            elif self.waiting_for == "attendees":
+                # Try updating attendees directly from the message
+                meeting.update_from_entities({'ATTENDEE': [user_message]})
+                
+                # Resolve attendees to emails if we have any
+                if meeting.attendees:
+                    result = self.resolve_attendees(meeting, meeting.attendees)
+                    
+                    # Check if we got a tuple result (indicating potential error)
+                    if isinstance(result, tuple):
+                        success, message = result
+                        
+                        # If there's an error message, return it
+                        if not success and message is not None:
+                            return message
+                            
+                        # Otherwise, if disambiguation is needed
+                        if not success and self.disambiguation_session:
+                            # We have ambiguous attendees, show disambiguation options
+                            options_message = self.attendee_resolver.format_disambiguation_options(
+                                self.disambiguation_session['current_name'],
+                                self.disambiguation_session['options']
+                            )
+                            return options_message
+                    
+                    # Acknowledge the attendees added
+                    attendee_str = ", ".join(meeting.attendees)
+                    response = f"Great! I've added {attendee_str} to the meeting."
+                        
+                    # Check if meeting is now complete
+                    if meeting.is_complete():
+                        self.waiting_for = None
+                        return f"{response}\n\n{self._generate_confirmation_message(meeting)}"
+                    else:
+                        # Check if anything else is missing
+                        missing = meeting.get_missing_info()
+                        if "date" in missing:
+                            self.waiting_for = "date"
+                            return f"{response}\n\nWhat date would you like to schedule this meeting for?"
+                        elif "time" in missing:
+                            self.waiting_for = "time"
+                            return f"{response}\n\nWhat time would work for this meeting?"
+                        elif "duration" in missing:
+                            self.waiting_for = "duration"
+                            return f"{response}\n\nHow long should the meeting last?"
+                
+                attendee_examples = "Examples: John Smith, Sarah from Marketing, etc."
+                return f"I still need attendees for the meeting. {attendee_examples}"
         
         # Fallback response
         return self.response_generator.get_fallback()
@@ -313,7 +776,9 @@ class ConversationState:
         message = "Okay! Let me confirm:\n"
         
         if meeting.date:
-            message += f"* Date: {meeting.date_parser.format_date(meeting.date)}\n"
+            # Always use full date format instead of relative terms like "Tomorrow"
+            date_str = meeting.date.strftime("%A, %B %d, %Y")  # Example: "Tuesday, March 12, 2025"
+            message += f"* Date: {date_str}\n"
             
         if meeting.time:
             message += f"* Time: {meeting.date_parser.format_time(meeting.time)}\n"
@@ -322,23 +787,18 @@ class ConversationState:
             message += f"* Duration: {meeting.date_parser.format_duration(meeting.duration)}\n"
             
         if meeting.attendees:
-            # Format attendees with proper capitalization and join with commas
-            # Ensure we don't have any duplicates in the final display
-            unique_attendees = []
-            seen_lower = set()
-            
+            # Format attendees with their email addresses
+            formatted_attendees = []
             for attendee in meeting.attendees:
-                # Convert to lowercase for comparison
-                attendee_lower = attendee.lower()
-                
-                # Check if this is a duplicate (case-insensitive)
-                if attendee_lower not in seen_lower:
-                    seen_lower.add(attendee_lower)
-                    unique_attendees.append(attendee)
-            
-            # Format the unique attendees
-            formatted_attendees = ", ".join(unique_attendees)
-            message += f"* Attendees: {formatted_attendees}\n"
+                # Get email if available
+                email = meeting.attendee_emails.get(attendee, "")
+                if email:
+                    formatted_attendees.append(f"{attendee} ({email})")
+                else:
+                    formatted_attendees.append(attendee)
+                    
+            attendees_str = ", ".join(formatted_attendees)
+            message += f"* Attendees: {attendees_str}\n"
             
         message += "Is that correct?"
         return message

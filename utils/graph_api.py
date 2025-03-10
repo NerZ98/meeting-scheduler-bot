@@ -241,14 +241,19 @@ class MicrosoftGraphClient:
         end_time = end_datetime.isoformat()
         logger.info(f"DEBUG: Calculated end_time: {end_time}")
         
-        # Format attendees
+        # Format attendees using resolved emails if available
         attendees = []
+        attendee_emails = meeting_data.get('attendee_emails', {})
+        
         for attendee in meeting_data.get('attendees', []):
-            # Check if attendee is an email or just a name
-            if '@' in attendee:
+            # Check if we have a resolved email for this attendee
+            if attendee in attendee_emails:
+                email = attendee_emails[attendee]
+            elif '@' in attendee:
+                # The attendee name itself is an email
                 email = attendee
             else:
-                # This is just a placeholder - in a real app, you'd look up the email
+                # Fall back to the default format if no resolved email is available
                 email = f"{attendee.lower().replace(' ', '.')}@biz4solutions.com"
             
             attendees.append({
@@ -268,11 +273,11 @@ class MicrosoftGraphClient:
             },
             "start": {
                 "dateTime": start_time,
-                "timeZone": "India Standard Time"  # Changed from UTC to IST
+                "timeZone": "India Standard Time"  # Using IST timezone
             },
             "end": {
                 "dateTime": end_time,
-                "timeZone": "India Standard Time"  # Changed from UTC to IST
+                "timeZone": "India Standard Time"  # Using IST timezone
             },
             "location": {
                 "displayName": meeting_data.get('location', '')
@@ -285,20 +290,13 @@ class MicrosoftGraphClient:
         # Debug logging
         logger.info(f"DEBUG: Final event object: {json.dumps(event, default=str)}")
         
-        # Check token before making the request
-        token = self.get_token_for_user(user_id)
-        if not token:
-            logger.error(f"DEBUG: No valid token available for user_id: {user_id}")
-        else:
-            logger.info(f"DEBUG: Valid token found for user_id: {user_id} (truncated): {token[:10]}...")
-        
         # Make the API call (use /me endpoint with delegated permissions)
         endpoint = "me/events"
         return self._make_request("post", endpoint, event, user_id)
 
     def update_meeting(self, user_id, meeting_id, meeting_data):
         """
-        Update an existing meeting using the Microsoft Graph API
+        Update an existing meeting
         
         Parameters:
         - user_id: User's ID (from token)
@@ -331,11 +329,11 @@ class MicrosoftGraphClient:
             
             update["start"] = {
                 "dateTime": start_time,
-                "timeZone": "India Standard Time"  # Changed from UTC to IST
+                "timeZone": "India Standard Time"  # Using IST timezone
             }
             update["end"] = {
                 "dateTime": end_time,
-                "timeZone": "India Standard Time"  # Changed from UTC to IST
+                "timeZone": "India Standard Time"  # Using IST timezone
             }
         
         if 'location' in meeting_data:
@@ -345,9 +343,14 @@ class MicrosoftGraphClient:
         
         if 'attendees' in meeting_data:
             attendees = []
+            attendee_emails = meeting_data.get('attendee_emails', {})
+            
             for attendee in meeting_data['attendees']:
-                # Check if attendee is an email or just a name
-                if '@' in attendee:
+                # Check if we have a resolved email for this attendee
+                if attendee in attendee_emails:
+                    email = attendee_emails[attendee]
+                elif '@' in attendee:
+                    # The attendee name itself is an email
                     email = attendee
                 else:
                     # This is just a placeholder - in a real app, you'd look up the email
@@ -405,11 +408,11 @@ class MicrosoftGraphClient:
             "schedules": schedules,
             "startTime": {
                 "dateTime": start_time,
-                "timeZone": "India Standard Time"  # Changed from UTC to IST
+                "timeZone": "India Standard Time"  # Using IST timezone
             },
             "endTime": {
                 "dateTime": end_time,
-                "timeZone": "India Standard Time"  # Changed from UTC to IST
+                "timeZone": "India Standard Time"  # Using IST timezone
             },
             "availabilityViewInterval": 15  # 15-minute intervals
         }
