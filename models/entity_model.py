@@ -7,6 +7,7 @@ import numpy as np
 from sklearn.preprocessing import LabelEncoder
 from tqdm import tqdm
 import re
+import datetime
 
 class NERDataset(Dataset):
     def __init__(self, df, tokenizer, max_len=128, label_encoder=None):
@@ -299,13 +300,18 @@ class EntityRecognitionModel:
             
         self.model.eval()
         
-        # Basic pattern matching for common formats in case BERT misses them
-        import re
+        # Dictionary to store all extracted entities
+        entities = {}
+        
+        # ====== DIRECT PATTERN MATCHING - Do this first to ensure key patterns aren't missed ======
         
         # Direct pattern matching for times
         time_patterns = [
-            (r'(\d{1,2})\s*(?::|\.)\s*(\d{2})\s*([ap]\.?m\.?)', lambda m: f"{m.group(1)}:{m.group(2)} {m.group(3)}"),
-            (r'(\d{1,2})\s*([ap]\.?m\.?)', lambda m: f"{m.group(1)} {m.group(2)}"),
+            # More explicit patterns with better matching for edge cases
+            (r'at\s+(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)', lambda m: f"{m.group(1)}{':' + m.group(2) if m.group(2) else ''} {m.group(3)}"),
+            (r'(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)', lambda m: f"{m.group(1)}{':' + m.group(2) if m.group(2) else ''} {m.group(3)}"),
+            (r'at\s+(\d{1,2})\s*([ap]\.?m\.?)', lambda m: f"{m.group(1)} {m.group(2)}"),
+            (r'at\s+(\d{1,2})(?::(\d{2}))?', lambda m: f"{m.group(1)}{':' + m.group(2) if m.group(2) else ''}"),
             (r'(\d{1,2})\s*o\'?clock', lambda m: f"{m.group(1)} o'clock"),
         ]
         
@@ -317,10 +323,12 @@ class EntityRecognitionModel:
         
         # Direct pattern matching for durations
         duration_patterns = [
+            (r'for\s+(\d+)\s*(?:hour|hr)s?', lambda m: f"{m.group(1)} hour"),
+            (r'for\s+(\d+)\s*(?:minute|min)s?', lambda m: f"{m.group(1)} minute"),
             (r'(\d+)\s*(?:hour|hr)s?', lambda m: f"{m.group(1)} hour"),
             (r'(\d+)\s*(?:minute|min)s?', lambda m: f"{m.group(1)} minute"),
-            (r'half\s*an?\s*hour', lambda m: "30 minutes"),
-            (r'an?\s*hour\s*and\s*(?:a\s*)?half', lambda m: "1.5 hours"),
+            (r'half\s*an?\s*hour', lambda m: "30 minute"),
+            (r'an?\s*hour\s*and\s*(?:a\s*)?half', lambda m: "90 minute"),
         ]
         
         duration_entities = []
@@ -335,37 +343,73 @@ class EntityRecognitionModel:
         # Clean any previous text to avoid common pitfalls
         text_for_attendees = re.sub(r'\[.*?\]', ' ', text.lower())  # Remove [sep] and similar tags
         
-        # Check for "add X and Y" pattern
-        add_pattern = r'add\s+([\w\s,]+)(?:to|for|into|in)?\s*(?:the|this|our)?\s*(?:meeting|call)'
-        add_match = re.search(add_pattern, text_for_attendees)
-        if add_match:
-            attendee_text = add_match.group(1).strip()
-            if attendee_text and attendee_text not in attendee_entities:
-                attendee_entities.append(attendee_text)
+        # Check for "with X" pattern - very common for attendees
+        with_pattern = r'with\s+([A-Za-z]+)'
+        with_matches = re.finditer(with_pattern, text_for_attendees)
+        for match in with_matches:
+            attendee = match.group(1).strip().capitalize()
+            if attendee and len(attendee) > 1 and attendee not in attendee_entities:
+                attendee_entities.append(attendee)
+        
+        # Check for "add X" pattern
+        add_pattern = r'add\s+([A-Za-z]+)'
+        add_matches = re.finditer(add_pattern, text_for_attendees)
+        for match in add_matches:
+            attendee = match.group(1).strip().capitalize()
+            if attendee and len(attendee) > 1 and attendee not in attendee_entities:
+                attendee_entities.append(attendee)
+        
+        # Check for date expressions like "tomorrow", "today", "next week"
+        date_keywords = {
+            "tomorrow": "tomorrow",
+            "today": "today",
+            "next week": "next week",
+            "next monday": "next monday",
+            "next tuesday": "next tuesday",
+            "next wednesday": "next wednesday",
+            "next thursday": "next thursday",
+            "next friday": "next friday",
+            "next saturday": "next saturday",
+            "next sunday": "next sunday"
+        }
+        
+        date_entities = []
+        for keyword, value in date_keywords.items():
+            if keyword in text.lower():
+                date_entities.append(value)
+        
+        # Direct pattern matching for specific date formats
+        date_patterns = [
+            # Match "14th March", "14 Mar", "March 14th" style dates
+            (r'(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|may|june|july|august|september|october|november|december)', lambda m: m.group(0)),
+            (r'(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:st|nd|rd|th)?', lambda m: m.group(0)),
+            # Match MM/DD or MM/DD/YYYY
+            (r'(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?', lambda m: m.group(0)),
+            # Match YYYY-MM-DD
+            (r'\d{4}-\d{1,2}-\d{1,2}', lambda m: m.group(0))
+        ]
+        
+        for pattern, formatter in date_patterns:
+            matches = re.finditer(pattern, text.lower())
+            for match in matches:
+                date_text = formatter(match)
+                if date_text and date_text not in date_entities:
+                    date_entities.append(date_text)
+        
+        # Add pattern-matched entities to our master dictionary
+        if time_entities:
+            entities['TIME'] = time_entities
+        
+        if duration_entities:
+            entities['DURATION'] = duration_entities
             
-        # Check for "with X and Y" pattern
-        with_pattern = r'(?:with|include|invite)\s+([\w\s,]+)(?:to|for|into|in)?\s*(?:the|this|our)?\s*(?:meeting|call)?'
-        with_match = re.search(with_pattern, text_for_attendees)
-        if with_match:
-            attendee_text = with_match.group(1).strip()
-            if attendee_text and attendee_text not in attendee_entities:
-                attendee_entities.append(attendee_text)
-            
-        # Check for names separated by "and" or commas not part of above patterns
-        if "and" in text:
-            # Look for capitalized names (more likely to be proper names)
-            potential_name_pattern = r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+and\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b'
-            name_matches = re.finditer(potential_name_pattern, text)
-            for match in name_matches:
-                # Extract full names with first and last names
-                name1 = match.group(1).strip()
-                name2 = match.group(2).strip()
-                
-                # Add each name separately for better processing
-                if name1 and name1 not in attendee_entities:
-                    attendee_entities.append(name1)
-                if name2 and name2 not in attendee_entities:
-                    attendee_entities.append(name2)
+        if attendee_entities:
+            entities['ATTENDEE'] = attendee_entities
+        
+        if date_entities:
+            entities['DATE'] = date_entities
+        
+        # ====== BERT MODEL PREDICTION ======
         
         # Tokenize for BERT
         encoding = self.tokenizer.encode_plus(
@@ -416,7 +460,6 @@ class EntityRecognitionModel:
         token_labels = list(zip(tokens, predicted_labels[:len(tokens)]))
         
         # Extract entities from BERT predictions
-        entities = {}
         current_entity = None
         current_type = None
         
@@ -457,61 +500,63 @@ class EntityRecognitionModel:
                 entities[entity_type] = []
             entities[entity_type].append(current_entity)
         
-        # Merge pattern-matched entities with BERT entities
-        if time_entities:
-            if 'TIME' not in entities:
-                entities['TIME'] = []
-            entities['TIME'].extend(time_entities)
-        
-        if duration_entities:
-            if 'DURATION' not in entities:
-                entities['DURATION'] = []
-            entities['DURATION'].extend(duration_entities)
-            
-        if attendee_entities:
-            if 'ATTENDEE' not in entities:
-                entities['ATTENDEE'] = []
-            entities['ATTENDEE'].extend(attendee_entities)
-        
-        # Special case for "tomorrow" and similar date expressions
-        date_keywords = ["tomorrow", "today", "next week", "next month"]
-        for keyword in date_keywords:
-            if keyword in text.lower() and 'DATE' not in entities:
-                entities['DATE'] = [keyword]
-                break
-        
-        # Enhanced date extraction with more patterns
+        # ====== ENHANCED DATE EXTRACTION - FINAL PASS ======
+        # Do this last to ensure we have dates even if previous methods miss them
         entities = self._enhance_date_extraction(text, entities)
         
-        # Apply additional date pattern matching for specific formats
-        if 'DATE' not in entities or not entities['DATE']:
-            # Match "19th of March", "19 March", "March 19th" type formats
-            date_patterns = [
-                # DD Month [YYYY]
-                r'(\d{1,2})(?:st|nd|rd|th)?(?:\s+of)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|may|june|july|august|september|october|november|december)(?:\s+\d{4})?',
-                # Month DD [YYYY]
-                r'(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s+\d{4})?',
-                # MM/DD[/YYYY]
-                r'(\d{1,2})/(\d{1,2})(?:/\d{2,4})?',
-                # YYYY-MM-DD
-                r'\d{4}-\d{1,2}-\d{1,2}'
-            ]
-            
-            for pattern in date_patterns:
-                match = re.search(pattern, text.lower())
-                if match:
-                    date_text = match.group(0)
-                    if 'DATE' not in entities:
-                        entities['DATE'] = []
-                    entities['DATE'].append(date_text)
-                    print(f"Pattern match: Found date '{date_text}'")
-                    break
+        # Try to extract compound time expressions
+        if 'TIME' not in entities and 'at' in text.lower():
+            time_in_compound = self.extract_time_from_compound(text)
+            if time_in_compound:
+                formatted_time = time_in_compound.strftime("%-I %p").lower() if time_in_compound.minute == 0 else time_in_compound.strftime("%-I:%M %p").lower()
+                if 'TIME' not in entities:
+                    entities['TIME'] = []
+                entities['TIME'].append(formatted_time)
+                print(f"Extracted compound time: {formatted_time}")
         
         # Print summary for debugging
         print(f"Extracted entities: {entities}")
         
         return entities
-    
+
+    def extract_time_from_compound(self, text):
+        """Extract time from compound statements that might include other entities"""
+        time_in_compound = None
+        
+        # Look for "at X" patterns in combined phrases
+        at_time_patterns = [
+            r'at\s+(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?',
+            r'at\s+(\d{1,2})\s*([ap]\.?m\.?)?',
+        ]
+        
+        for pattern in at_time_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                hour = int(match.group(1))
+                minute = int(match.group(2)) if match.group(2) and match.group(2).isdigit() else 0
+                ampm = match.group(3) if len(match.groups()) > 2 and match.group(3) else None
+                
+                # If no AM/PM is specified, check for it in the text
+                if not ampm:
+                    am_match = re.search(r'\b[aA]\.?[mM]\.?\b', text)
+                    pm_match = re.search(r'\b[pP]\.?[mM]\.?\b', text)
+                    
+                    if pm_match and not am_match:
+                        ampm = 'pm'
+                    elif am_match and not pm_match:
+                        ampm = 'am'
+                
+                # Adjust hour based on AM/PM if specified
+                if ampm and ('p' in ampm.lower()) and hour < 12:
+                    hour += 12
+                elif ampm and ('a' in ampm.lower()) and hour == 12:
+                    hour = 0
+                    
+                time_in_compound = datetime.time(hour, minute)
+                break
+        
+        return time_in_compound
+
     def load(self, model_path):
         # Load label encoder
         import joblib
@@ -542,3 +587,41 @@ class EntityRecognitionModel:
         
         print(f"Model saved to {model_path}")
         print(f"Label encoder saved to {encoder_path}")
+        
+    def extract_time_from_compound(self, text):
+        """Extract time from compound statements that might include other entities"""
+        time_in_compound = None
+        
+        # Look for "at X" patterns in combined phrases
+        at_time_patterns = [
+            r'at\s+(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?',
+            r'at\s+(\d{1,2})\s*([ap]\.?m\.?)?',
+        ]
+        
+        for pattern in at_time_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                hour = int(match.group(1))
+                minute = int(match.group(2)) if match.group(2) and match.group(2).isdigit() else 0
+                ampm = match.group(3) if len(match.groups()) > 2 and match.group(3) else None
+                
+                # If no AM/PM is specified, check for it in the text
+                if not ampm:
+                    am_match = re.search(r'\b[aA]\.?[mM]\.?\b', text)
+                    pm_match = re.search(r'\b[pP]\.?[mM]\.?\b', text)
+                    
+                    if pm_match and not am_match:
+                        ampm = 'pm'
+                    elif am_match and not pm_match:
+                        ampm = 'am'
+                
+                # Adjust hour based on AM/PM if specified
+                if ampm and ('p' in ampm.lower()) and hour < 12:
+                    hour += 12
+                elif ampm and ('a' in ampm.lower()) and hour == 12:
+                    hour = 0
+                    
+                time_in_compound = datetime.time(hour, minute)
+                break
+        
+        return time_in_compound

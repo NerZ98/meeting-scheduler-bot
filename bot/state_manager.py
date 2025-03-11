@@ -222,12 +222,20 @@ class ConversationState:
         Handle an intent and update the state accordingly
         Returns a response message
         """
+        # CRITICAL FIX: First process all entities regardless of intent
+        # This ensures we capture everything the user mentioned
+        if entities:
+            meeting = self.get_current_meeting()
+            if meeting:
+                updates = meeting.update_from_entities(entities)
+                print(f"Processed all entities first: {updates}")
+        
         # Check if we're in disambiguation mode
         if self.disambiguation_session:
             response, handled = self.handle_attendee_disambiguation(user_message)
             if handled:
                 return response
-        
+            
         print(f"Handling intent: {intent}")
         print(f"Entities extracted: {entities}")
         print(f"User message: {user_message}")
@@ -246,7 +254,18 @@ class ConversationState:
             if parsed_duration:
                 meeting.duration = parsed_duration
                 duration_str = meeting.date_parser.format_duration(parsed_duration)
-                response = f"Duration set to {duration_str}."
+                
+                # Build response acknowledging all changes, not just duration
+                response_parts = []
+                
+                # Include time if it was updated in this message
+                if 'TIME' in entities and meeting.time:
+                    time_str = meeting.date_parser.format_time(meeting.time)
+                    response_parts.append(f"Time set to {time_str}")
+                    
+                response_parts.append(f"Duration set to {duration_str}")
+                
+                response = ". ".join(response_parts) + "."
                 
                 # Check if meeting is now complete
                 if meeting.is_complete():
@@ -275,6 +294,24 @@ class ConversationState:
                     # Do NOT automatically generate confirmation
                     return response
             
+            # Handle simple day names like "Thursday" as date updates
+            day_names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+            if original_message.lower() in day_names:
+                try:
+                    # Get the next occurrence of this day
+                    day_idx = day_names.index(original_message.lower())
+                    today_idx = self.reference_date.weekday()
+                    days_ahead = (day_idx - today_idx) % 7
+                    if days_ahead == 0:
+                        days_ahead = 7  # If today, get next week
+                        
+                    next_date = self.reference_date + datetime.timedelta(days=days_ahead)
+                    meeting.date = next_date
+                    date_str = next_date.strftime("%A, %B %d, %Y")
+                    return f"Date set to {date_str}."
+                except Exception as e:
+                    print(f"Error parsing day name: {e}")
+        
             elif self.change_mode == 'time':
                 # Try to parse the time
                 parsed_time = self.date_parser.parse_time(user_message)
@@ -369,7 +406,7 @@ class ConversationState:
         if (intent == 'Other' or intent == 'Confirm_Meeting') and any(phrase in original_message for phrase in restart_phrases):
             # Completely reset the meeting
             meeting = self.start_new_meeting()
-            return "No problem. Let's start over. What details would you like to change?"
+            return "Meeting context has been reset. I'm ready to start over. How can I help you schedule a meeting?"
         
         # Explicit confirmation
         if (intent == 'Confirm_Meeting' or intent == 'Other') and any(phrase in original_message for phrase in confirmation_phrases):
@@ -390,83 +427,79 @@ class ConversationState:
             # Reset cancelled state if it was previously cancelled
             meeting.is_cancelled = False
             
-            # Update with any provided entities
-            meeting.update_from_entities(entities)
+            # CRITICAL FIX: Process all entities at once (done at the beginning now)
             meeting.last_update = "intent"
             
-            # If attendees were provided, resolve them immediately
-            if 'ATTENDEE' in entities and entities['ATTENDEE'] and meeting.attendees:
+            # Debug output to see what's in the meeting context after update
+            print(f"DEBUG: After update, meeting state: {meeting.to_dict()}")
+            
+            # CRITICAL FIX: Resolve attendees if any were extracted
+            if meeting.attendees:
                 result = self.resolve_attendees(meeting, meeting.attendees)
-                
-                # Check if we got a tuple result (indicating potential error)
                 if isinstance(result, tuple):
                     success, message = result
-                    
-                    # If there's an error message, return it
                     if not success and message is not None:
                         return message
-                        
-                    # Otherwise, if disambiguation is needed
                     if not success and self.disambiguation_session:
-                        # We have ambiguous attendees, show disambiguation options
                         options_message = self.attendee_resolver.format_disambiguation_options(
                             self.disambiguation_session['current_name'],
                             self.disambiguation_session['options']
                         )
                         return options_message
             
+            # CRITICAL FIX: Check if we have everything we need first!
+            if meeting.is_complete():
+                return self._generate_confirmation_message(meeting)
+            
             # Get missing info after updating
             missing = meeting.get_missing_info()
+            print(f"DEBUG: Missing info: {missing}")
             
-            # Prepare a clear and concise response that acknowledges what's been set
-            # and asks for what's still needed
+            # Prepare response acknowledging what we have
             response_parts = []
-            
+
             # Acknowledge what's been set
             if meeting.date:
                 date_str = meeting.date.strftime("%A, %B %d, %Y")
-                response_parts.append(f"I'll schedule a meeting for {date_str}")
-            
+                response_parts.append(f"Date set to {date_str}")
+
             if meeting.time:
-                time_str = meeting.date_parser.format_time(meeting.time)
-                if response_parts:
-                    response_parts[0] += f" at {time_str}"
-                else:
-                    response_parts.append(f"I'll schedule a meeting at {time_str}")
-            
+                time_str = self.date_parser.format_time(meeting.time)
+                response_parts.append(f"Time set to {time_str}")
+
             if meeting.duration:
-                duration_str = meeting.date_parser.format_duration(meeting.duration)
-                response_parts.append(f"The meeting will last {duration_str}")
-            
+                duration_str = self.date_parser.format_duration(meeting.duration)
+                response_parts.append(f"Duration set to {duration_str}")
+
             if meeting.attendees:
                 attendee_str = ", ".join(meeting.attendees)
                 response_parts.append(f"Attendees: {attendee_str}")
-            
+
             # Combine what we know so far
             if response_parts:
                 response = ". ".join(response_parts) + "."
             else:
                 response = "I'll help you schedule a meeting."
             
+            # CRITICAL FIX: Check if we got everything we need
+            if not missing:
+                return self._generate_confirmation_message(meeting)
+            
             # Ask for what's missing
+            missing_str = ", ".join(missing)
+            response += f"\nI still need the following details: {missing_str.capitalize()}."
+            
+            # Set what we're waiting for based on missing info
             if "date" in missing:
                 self.waiting_for = "date"
-                return f"{response}\n\nWhat date would you like to schedule this meeting for?"
-            
             elif "time" in missing:
                 self.waiting_for = "time"
-                return f"{response}\n\nWhat time would work for the meeting?"
-                
             elif "duration" in missing:
                 self.waiting_for = "duration"
-                return f"{response}\n\nHow long should the meeting last?"
-            
             elif "attendees" in missing:
                 self.waiting_for = "attendees"
-                return f"{response}\n\nWho would you like to invite to this meeting?"
-            
-            # If we have all required info, show confirmation
-            return self._generate_confirmation_message(meeting)
+                
+            return response
         
         elif intent == "Add_Attendee":
             # Update attendees
@@ -534,7 +567,8 @@ class ConversationState:
             else:
                 missing = meeting.get_missing_info()
                 missing_str = ", ".join(missing)
-                response = f"Attendees added. "
+                # FIX: Better response that acknowledges the attendee update and prompts for next detail
+                response = f"Attendees updated to: {', '.join(meeting.attendees)}."
                 
                 if "time" in missing:
                     self.waiting_for = "time"
@@ -819,3 +853,67 @@ class ConversationState:
                 "bot": bot_response,
                 "timestamp": datetime.datetime.now().isoformat()
             })
+            
+    def handle_time_in_message(self, meeting, text):
+        """Special handler to extract time information from messages with improved AM/PM handling"""
+        # First try direct time patterns
+        parsed_time = self.date_parser.parse_time(text)
+        if parsed_time:
+            meeting.time = parsed_time
+            print(f"Successfully parsed time: {parsed_time} from '{text}'")
+            return True
+                
+        # Next try to find time patterns in the text
+        time_patterns = [
+            r'at\s+(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?',
+            r'at\s+(\d{1,2})\s*([ap]\.?m\.?)?',
+            r'(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)',
+            r'(\d{1,2})\s*([ap]\.?m\.?)',
+        ]
+            
+        for pattern in time_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                hour = int(match.group(1))
+                    
+                # Check if minutes are captured
+                minute = 0
+                if len(match.groups()) > 1 and match.group(2) and match.group(2).isdigit():
+                    try:
+                        minute = int(match.group(2))
+                    except (ValueError, TypeError):
+                        minute = 0
+                    
+                # Check for AM/PM
+                ampm = None
+                if len(match.groups()) > 2 and match.group(3):
+                    ampm = match.group(3)
+                elif len(match.groups()) > 1 and match.group(2) and not match.group(2).isdigit():
+                    ampm = match.group(2)
+                        
+                # If no AM/PM is specified, check for it in the text
+                if not ampm:
+                    am_match = re.search(r'\b[aA]\.?[mM]\.?\b', text)
+                    pm_match = re.search(r'\b[pP]\.?[mM]\.?\b', text)
+                        
+                    if pm_match and not am_match:
+                        ampm = 'pm'
+                    elif am_match and not pm_match:
+                        ampm = 'am'
+                    # IMPORTANT FIX: For business hours (8-6), default to PM for 1-6, AM for 7-12
+                    # This is a reasonable default for meeting times
+                    elif not am_match and not pm_match:
+                        if 1 <= hour <= 6:
+                            ampm = 'pm'  # Default 1-6 to PM
+                    
+                # Adjust hour based on AM/PM
+                if ampm and ('p' in ampm.lower()) and hour < 12:
+                    hour += 12
+                elif ampm and ('a' in ampm.lower()) and hour == 12:
+                    hour = 0
+                        
+                meeting.time = datetime.time(hour, minute)
+                print(f"Extracted time from pattern: {meeting.time} from '{text}', AM/PM context: {ampm}")
+                return True
+            
+        return False

@@ -42,13 +42,28 @@ class MeetingSchedulerBot:
         if user_message.lower() in ["hi", "hello", "hey"]:
             return self.greeting
         
+        # CRITICAL FIX: Preprocess the message to identify and handle special cases
+        lower_msg = user_message.lower().strip()
+        
+        # Get the current meeting context
+        meeting = self.state.get_current_meeting()
+        
+        # CRITICAL FIX: Direct time processing - this catches statements like "at 2pm" that might be missed
+        if "at " in lower_msg and any(term in lower_msg for term in ["am", "pm", "o'clock"]):
+            # Try to extract time directly
+            try:
+                self.state.handle_time_in_message(meeting, user_message)
+            except Exception as e:
+                print(f"Error processing time: {e}")
+        
         # Rule-based overrides for common scheduling phrases
-        lower_msg = user_message.lower()
+        combined_request = False
         if ("schedule" in lower_msg or "set up" in lower_msg or "book" in lower_msg or "arrange" in lower_msg) and (
             "meeting" in lower_msg or "call" in lower_msg or "appointment" in lower_msg
         ):
             print("Rule-based override: Forcing Schedule_Meeting intent")
             intent = "Schedule_Meeting"
+            combined_request = True
         else:
             # Classify intent
             intent_result = self.intent_model.predict(user_message)
@@ -60,14 +75,54 @@ class MeetingSchedulerBot:
         entities = self.entity_model.predict(user_message)
         print(f"Extracted entities: {entities}")
         
+        # CRITICAL FIX: Add time entity if we detected it directly 
+        if meeting.time and 'TIME' not in entities:
+            time_str = meeting.date_parser.format_time(meeting.time)
+            entities['TIME'] = [time_str]
+            print(f"Added missing TIME entity: {time_str}")
+        
+        # CRITICAL FIX: Special case for follow-up time messages that might be missed
+        if not entities and any(term in lower_msg for term in ["pm", "am", "o'clock"]):
+            # This might be a time-only message that was missed by the entity extraction
+            parsed_time = self.state.handle_time_in_message(meeting, user_message)
+            if parsed_time:
+                # Force the Change_Time intent
+                intent = "Change_Time"
+                time_str = meeting.date_parser.format_time(meeting.time)
+                entities['TIME'] = [time_str]
+                print(f"Forced TIME entity for time-only message: {time_str}")
+        
+        # CRITICAL FIX: For combined scheduling requests, make sure to process all entities at once
+        if combined_request:
+            meeting.update_from_entities(entities)
+            
+            # CRITICAL: Check if all required info is present before responding
+            if meeting.is_complete():
+                return self.state.handle_intent(intent, entities, user_message)
+        
         # Generate response based on intent and entities
         response = self.state.handle_intent(intent, entities, user_message)
+        
+        # CRITICAL FIX: Special error handling for edge cases
+        if "Sorry, I encountered an error" in response:
+            # Try to handle the message as a time-only message
+            if self.state.handle_time_in_message(meeting, user_message):
+                time_str = meeting.date_parser.format_time(meeting.time)
+                response = f"Time set to {time_str}."
+                
+                # Check if we have everything now
+                if meeting.is_complete():
+                    response += "\n\n" + self.state._generate_confirmation_message(meeting)
+                else:
+                    missing = meeting.get_missing_info()
+                    missing_str = ", ".join(missing)
+                    response += f"\nI still need the following details: {missing_str.capitalize()}."
         
         # Log the conversation
         self.state.log_conversation(user_message, response)
         
         return response
-    
+
     def get_current_meeting_state(self):
         """
         Get the current meeting state as a dictionary

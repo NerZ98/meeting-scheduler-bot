@@ -274,6 +274,41 @@ class DateTimeParser:
         # Debugging print to see what's being parsed
         print(f"Parsing date from: '{text}'")
         
+        # CRITICAL FIX: Directly try to match common date formats first
+        # Match "15th march", "16th march", "14th of march" 
+        direct_day_month_pattern = r'(\d{1,2})(?:st|nd|rd|th)?(?:\s+of)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|may|june|july|august|september|october|november|december)'
+        match = re.search(direct_day_month_pattern, text)
+        if match:
+            # Extract the day number properly - this is critical
+            day_match = re.search(r'\d+', match.group(0))
+            if day_match:
+                day = int(day_match.group(0))
+                
+                # Extract the month name
+                month_match = re.search(r'(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|may|june|july|august|september|october|november|december)', text)
+                if month_match:
+                    month_str = month_match.group(0)
+                    
+                    # Convert month name to number
+                    month = None
+                    for key, value in self.month_mapping.items():
+                        if key in month_str:
+                            month = value
+                            break
+                    
+                    if month and 1 <= day <= 31:
+                        year = self.reference_date.year
+                        
+                        # Create the date
+                        try:
+                            result_date = datetime.date(year, month, day)
+                            print(f"Direct match: day={day}, month={month}, result={result_date}")
+                            return result_date
+                        except ValueError:
+                            print(f"Invalid date: day={day}, month={month}")
+                            # Handle invalid dates like Feb 30
+                            pass
+        
         # Try each pattern
         for pattern, parser_func in self.date_patterns.items():
             match = re.search(pattern, text)
@@ -290,7 +325,7 @@ class DateTimeParser:
         except:
             print(f"Failed to parse date: {text}")
             return None
-    
+            
     def parse_time(self, text):
         """Parse a time from natural language text"""
         if not text:

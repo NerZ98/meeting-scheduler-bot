@@ -29,42 +29,61 @@ class MeetingContext:
         self.last_update = None  # Track what was last updated
         
     def update_from_entities(self, entities):
-        """Update the meeting context based on extracted entities"""
+        """Update the meeting context based on extracted entities with improved handling"""
         entity_updates = {}  # Track what was updated for debugging
         
+        # FIX: Sort date entities by specificity
         if 'DATE' in entities and entities['DATE']:
-            # Check if we have dates to process
+            date_entities = []
             for date_text in entities['DATE']:
-                if not date_text:
+                if not date_text or date_text.lower() in ['it', 'this', 'that']:
                     continue
                     
-                # Skip "it" or other common non-date references
-                if date_text.lower() in ['it', 'this', 'that']:
-                    continue
-                    
-                # Try to parse the date
+                # Parse the date and track its specificity
                 parsed_date = self.date_parser.parse_date(date_text)
                 if parsed_date:
-                    self.date = parsed_date
-                    entity_updates['date'] = date_text
-                    print(f"Updated date to: {self.date} from '{date_text}'")
-                    break  # Take the first valid date
+                    # Check specificity - more words indicates more specific date references
+                    specificity = len(date_text.split())
+                    # If it contains numbers, it's likely more specific
+                    if any(char.isdigit() for char in date_text):
+                        specificity += 5
+                    date_entities.append((parsed_date, date_text, specificity))
+            
+            # Sort by specificity (highest first)
+            date_entities.sort(key=lambda x: x[2], reverse=True)
+            
+            # Use the most specific date
+            if date_entities:
+                self.date = date_entities[0][0]
+                entity_updates['date'] = date_entities[0][1]
+                print(f"Updated date to: {self.date} from '{date_entities[0][1]}' (most specific)")
         
+        # FIX: Prioritize time entities with AM/PM markers
         if 'TIME' in entities and entities['TIME']:
-            # Take the last time mentioned
+            time_entities = []
             for time_text in entities['TIME']:
                 if not time_text:
                     continue
                     
                 parsed_time = self.date_parser.parse_time(time_text)
                 if parsed_time:
-                    self.time = parsed_time
-                    entity_updates['time'] = time_text
-                    print(f"Updated time to: {self.time} from '{time_text}'")
-                    break  # Take the first valid time
+                    # Check specificity - if AM/PM is explicitly mentioned
+                    specificity = len(time_text.split())
+                    if 'am' in time_text.lower() or 'pm' in time_text.lower():
+                        specificity += 10  # Strongly prefer explicit AM/PM
+                    time_entities.append((parsed_time, time_text, specificity))
+            
+            # Sort by specificity (highest first)
+            time_entities.sort(key=lambda x: x[2], reverse=True)
+            
+            # Use the most specific time
+            if time_entities:
+                self.time = time_entities[0][0]
+                entity_updates['time'] = time_entities[0][1]
+                print(f"Updated time to: {self.time} from '{time_entities[0][1]}' (most specific)")
         
+        # Process duration - least controversial part
         if 'DURATION' in entities and entities['DURATION']:
-            # Take the last duration mentioned
             for duration_text in entities['DURATION']:
                 if not duration_text:
                     continue
@@ -74,8 +93,9 @@ class MeetingContext:
                     self.duration = parsed_duration
                     entity_updates['duration'] = duration_text
                     print(f"Updated duration to: {self.duration} from '{duration_text}'")
-                    break  # Take the first valid duration
+                    break
         
+        # Attendee processing 
         if 'ATTENDEE' in entities and entities['ATTENDEE']:
             # Create a set to store unique attendees
             unique_attendees = set()
@@ -150,7 +170,7 @@ class MeetingContext:
         # Debug output
         if entity_updates:
             print(f"Updated entities: {entity_updates}")
-            
+                
         return entity_updates
 
     def _process_raw_text(self, text, already_updated):
