@@ -268,7 +268,14 @@ class ConversationState:
         # If we have attendees not found in the database, return error message
         if not_found_names:
             not_found_names_str = ", ".join(not_found_names)
-            error_message = f"I couldn't find the following attendee(s) in the organization: {not_found_names_str}. Please choose employees from your organization only."
+            
+            # IMPROVED: Keep the attendees we did find and inform about the ones we didn't
+            # Add the resolved attendees to the meeting
+            for name, email in resolved_pairs:
+                # Store the email
+                meeting.attendee_emails[name] = email
+                
+            error_message = f"I couldn't find the following attendee(s) in the organization: {not_found_names_str}. However, I've added the attendees I could find."
             return (False, error_message)
         
         # Add resolved attendees to the meeting

@@ -95,7 +95,7 @@ class MeetingContext:
                     print(f"Updated duration to: {self.duration} from '{duration_text}'")
                     break
         
-        # Improved attendee processing 
+        # IMPROVED: Better attendee processing with multiple attendee support
         if 'ATTENDEE' in entities and entities['ATTENDEE']:
             # Start with existing attendees (if any)
             unique_attendees = set(self.attendees) if hasattr(self, 'attendees') else set()
@@ -121,14 +121,44 @@ class MeetingContext:
             for word in non_attendee_words:
                 cleaned_attendee = cleaned_attendee.replace(word, ',')
             
-            # Split by commas, 'and', etc.
-            attendee_list = re.split(r',|\band\b', cleaned_attendee)
+            # IMPROVED: Better splitting to handle space-separated names as well
+            # First split by explicit separators (commas, 'and')
+            explicit_splits = re.split(r',|\band\b', cleaned_attendee)
+            
+            # For entries that look like multiple space-separated names, split them further
+            attendee_list = []
+            for item in explicit_splits:
+                item = item.strip()
+                
+                # If this looks like it might be multiple space-separated names
+                if len(item.split()) > 1:
+                    # Check if it's likely to be multiple names (capitalized words)
+                    words = item.split()
+                    # Only attempt to split if we have capitalized words in the original text
+                    # We check the original entities to determine if these are likely separate names
+                    
+                    # Add the whole item first
+                    if item:
+                        attendee_list.append(item)
+                    
+                    # Also add individual words that might be names
+                    # This is speculative, but helps catch "add John Jane" style inputs
+                    for word in words:
+                        word = word.strip()
+                        if (len(word) > 1 and 
+                            word.isalpha() and  # only alphabetic characters
+                            word not in ['and', 'with', 'add', 'to']):  # not connecting words
+                            attendee_list.append(word)
+                else:
+                    if item:
+                        attendee_list.append(item)
+                    
             print(f"DEBUG: Split attendee list: {attendee_list}")
             
             # List of words to exclude as attendee names
             exclude_words = ['yes', 'no', 'confirm', 'ok', 'okay', 'sure', 'correct', 
                             'the', 'a', 'an', 'this', 'that', 'these', 'those', 
-                            'for', 'to', 'at', 'on', 'in', 'with', 'by']
+                            'for', 'to', 'at', 'on', 'in', 'with', 'by', 'min']
             
             new_attendees = []
             
@@ -168,6 +198,10 @@ class MeetingContext:
             # Update the set of unique attendees
             for attendee in new_attendees:
                 unique_attendees.add(attendee)
+            
+            # Filter out anything that looks like a duration from attendees
+            unique_attendees = set([att for att in unique_attendees 
+                      if not re.search(r'\d+\s*(?:min|minute|hour|hr)', att.lower())])
             
             # Update the attendees list
             self.attendees = list(unique_attendees)

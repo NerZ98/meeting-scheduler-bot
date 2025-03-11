@@ -52,7 +52,7 @@ class AttendeeResolver:
         
         if not matching_users:
             self.logger.info(f"No users found for name '{name}'")
-            return {'status': 'not_found'}
+            return {'status': 'not_found', 'name': name}  # Added name to make it clear which name wasn't found
         
         if len(matching_users) == 1:
             # Exactly one match found
