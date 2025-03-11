@@ -153,6 +153,9 @@ class MeetingContext:
             # Update the attendees list
             self.attendees = list(unique_attendees)
             entity_updates['attendees'] = self.attendees
+            
+            # Flag that we need attendee resolution (NEW)
+            self.needs_attendee_resolution = True
         
         # Check for time in text if TIME entity not detected
         # This is a fallback mechanism

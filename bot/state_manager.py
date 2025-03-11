@@ -144,8 +144,14 @@ class ConversationState:
         Returns True if all attendees were resolved, False if disambiguation is needed
         Returns a tuple of (success, message) if there are attendees not found in the database
         """
+        # Debug statement
+        print(f"DEBUG: resolve_attendees called with: {attendee_names}")
+        
         # Try to resolve the attendees
         resolved, ambiguous, not_found = self.attendee_resolver.resolve_attendees(attendee_names)
+        
+        # Debug
+        print(f"DEBUG: Resolution results - resolved: {resolved}, ambiguous: {ambiguous}, not_found: {not_found}")
         
         # If we have attendees not found in the database, return error message
         if not_found:
@@ -164,14 +170,22 @@ class ConversationState:
         
         # If we have ambiguous attendees, start disambiguation
         if ambiguous:
+            # Debug statement
+            print(f"DEBUG: Starting disambiguation for ambiguous attendees: {list(ambiguous.keys())}")
+            
             # Store the ambiguous attendees for later
             self.pending_attendees = list(ambiguous.keys())
             
             # Start disambiguation session
             self.disambiguation_session = self.attendee_resolver.start_disambiguation_session(ambiguous)
             
+            # Debug
+            print(f"DEBUG: Disambiguation session created: {self.disambiguation_session}")
+            
             return (False, None)  # No error message, but we need disambiguation
         
+        # Debug statement
+        print("DEBUG: All attendees resolved successfully")
         return (True, None)  # All resolved successfully
     
     def _extract_date_from_message(self, meeting, message):
@@ -222,6 +236,33 @@ class ConversationState:
         Handle an intent and update the state accordingly
         Returns a response message
         """
+        # Check if we're in disambiguation mode
+        if self.disambiguation_session:
+            response, handled = self.handle_attendee_disambiguation(user_message)
+            if handled:
+                return response
+                
+        print(f"Handling intent: {intent}")
+        print(f"Entities extracted: {entities}")
+        print(f"User message: {user_message}")
+        
+        meeting = self.get_current_meeting()
+        original_message = user_message.lower().strip()
+        
+        # Handling restart and change scenarios
+        restart_phrases = ['nope', 'no', 'not correct', 'start over', 'reset', 'cancel']
+        confirmation_phrases = ['yes', 'confirm', 'ok', 'okay', 'correct', 'that is correct', 'looks good']
+        
+        # ADD HERE: Check for confirmation before entity processing
+        if meeting.is_complete() and any(phrase == original_message for phrase in confirmation_phrases):
+            # Explicit confirmation - avoid processing as an entity
+            meeting.is_confirmed = True
+            return "✅ Meeting scheduled successfully!"
+            
+        if any(phrase == original_message for phrase in restart_phrases):
+            # Completely reset the meeting
+            meeting = self.start_new_meeting()
+            return "Meeting context has been reset. I'm ready to start over. How can I help you schedule a meeting?"
         # CRITICAL FIX: First process all entities regardless of intent
         # This ensures we capture everything the user mentioned
         if entities:
@@ -229,13 +270,46 @@ class ConversationState:
             if meeting:
                 updates = meeting.update_from_entities(entities)
                 print(f"Processed all entities first: {updates}")
+                
+                # NEW: Always check for attendee resolution when attendees are updated
+                if 'attendees' in updates or getattr(meeting, 'needs_attendee_resolution', False):
+                    print("DEBUG: Attendees were updated, checking if resolution is needed")
+                    # Try to resolve attendees if any were extracted
+                    if meeting.attendees:
+                        result = self.resolve_attendees(meeting, meeting.attendees)
+                        
+                        # Check for disambiguation or errors
+                        if isinstance(result, tuple):
+                            success, message = result
+                            
+                            # If there's an error message, return it early
+                            if not success and message is not None:
+                                return message
+                                
+                            # If disambiguation is needed, interrupt normal flow
+                            if not success and self.disambiguation_session:
+                                print("DEBUG: Disambiguation session active, showing options")
+                                # We have ambiguous attendees, show disambiguation options
+                                options_message = self.attendee_resolver.format_disambiguation_options(
+                                    self.disambiguation_session['current_name'],
+                                    self.disambiguation_session['options']
+                                )
+                                # Reset the flag
+                                if hasattr(meeting, 'needs_attendee_resolution'):
+                                    meeting.needs_attendee_resolution = False
+                                
+                                return options_message
+                    
+                    # Clear the flag if we got here (all attendees resolved)
+                    if hasattr(meeting, 'needs_attendee_resolution'):
+                        meeting.needs_attendee_resolution = False
         
         # Check if we're in disambiguation mode
         if self.disambiguation_session:
             response, handled = self.handle_attendee_disambiguation(user_message)
             if handled:
                 return response
-            
+                
         print(f"Handling intent: {intent}")
         print(f"Entities extracted: {entities}")
         print(f"User message: {user_message}")
@@ -587,6 +661,30 @@ class ConversationState:
             meeting.update_from_entities(entities)
             meeting.last_update = "time"
             
+            # First check if attendees were added and handle disambiguation
+            if 'ATTENDEE' in entities and entities['ATTENDEE'] and meeting.attendees:
+                # If we have attendees, resolve them now before proceeding
+                attendee_names = meeting.attendees
+                result = self.resolve_attendees(meeting, attendee_names)
+                
+                # Check if we need disambiguation
+                if isinstance(result, tuple):
+                    success, message = result
+                    
+                    # If there's an error message, return it
+                    if not success and message is not None:
+                        return message
+                        
+                    # If disambiguation is needed
+                    if not success and self.disambiguation_session:
+                        # We have ambiguous attendees, show disambiguation options
+                        # This should break the flow and show options instead
+                        options_message = self.attendee_resolver.format_disambiguation_options(
+                            self.disambiguation_session['current_name'],
+                            self.disambiguation_session['options']
+                        )
+                        return options_message
+            
             if "TIME" in entities and entities["TIME"]:
                 time_str = meeting.date_parser.format_time(meeting.time)
                 response = f"No problem. Time changed to {time_str}."
@@ -617,15 +715,15 @@ class ConversationState:
                     
                 # If meeting is otherwise complete, show confirmation
                 if meeting.is_complete():
-                    response += "\n" + self._generate_confirmation_message(meeting)
+                    response += "\n\n" + self._generate_confirmation_message(meeting)
                 else:
                     missing = meeting.get_missing_info()
                     missing_str = ", ".join(missing)
                     response += f"\nI still need the following details: {missing_str.capitalize()}."
                 return response
             else:
-                self.waiting_for = "date"
-                return "What date would you like to change it to?"
+                self.waiting_for = "time"
+                return "What time would you like to change it to?"
         
         elif intent == "Change_Duration":
             # Update duration
