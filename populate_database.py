@@ -9,7 +9,7 @@ def add_test_users(db_path):
     db = UserDatabase(db_path)
 
     test_users = [
-        ('Ankit', 'Gupta', 'ankit.gupta1@biz4solutions.com', 'Engineering', 'Software Engineer'),
+        ('Love', 'Verma', 'love.verma1@biz4solutions.com', 'Engineering', 'Software Engineer'),
     ]
 
     added_count = 0

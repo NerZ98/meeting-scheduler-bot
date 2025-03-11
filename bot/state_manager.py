@@ -53,44 +53,144 @@ class ConversationState:
         if not self.disambiguation_session:
             return None, False
         
-        # Check if the user input is a number
+        # Get current meeting and preserve non-ambiguous attendees
+        meeting = self.get_current_meeting()
+        
+        # Save all attendees that aren't being disambiguated
+        preserved_attendees = []
+        preserved_emails = {}
+        
+        for attendee in meeting.attendees:
+            if attendee not in self.pending_attendees:
+                preserved_attendees.append(attendee)
+                if attendee in meeting.attendee_emails:
+                    preserved_emails[attendee] = meeting.attendee_emails[attendee]
+        
+        # Handle "both" or "all" responses
+        if user_message.lower() in ['both', 'all']:
+            # Select all options
+            ambiguous_name = self.disambiguation_session['current_name']
+            options = self.disambiguation_session['options']
+            
+            # Add all options to resolved attendees
+            for i, option in enumerate(options):
+                _, _, email = option
+                
+                # Use suffixed names for multiple attendees with the same name
+                if i == 0:
+                    name_to_use = ambiguous_name
+                else:
+                    name_to_use = f"{ambiguous_name} {i+1}"
+                    
+                # Store the resolved email
+                meeting.attendee_emails[name_to_use] = email
+                # Add to the final attendee list
+                if name_to_use not in preserved_attendees:
+                    preserved_attendees.append(name_to_use)
+            
+            # Reset the attendee list with all preserved and resolved attendees
+            meeting.attendees = preserved_attendees
+            
+            # Clear disambiguation state
+            self.disambiguation_session = None
+            self.pending_attendees = []
+            self.resolved_attendees = []
+            
+            # Show confirmation
+            if meeting.is_complete():
+                return self._generate_confirmation_message(meeting), True
+            else:
+                # Check if anything else is missing
+                missing = meeting.get_missing_info()
+                if missing:
+                    missing_str = ", ".join(missing)
+                    return f"All matching attendees added. I still need the following details: {missing_str.capitalize()}.", True
+                else:
+                    return "All matching attendees added. What else would you like to add to this meeting?", True
+        
+        # Handle multiple selection with spaces, commas, or logical connectors
+        if ' ' in user_message or ',' in user_message or ';' in user_message or ' and ' in user_message.lower():
+            # Extract all digits from the message
+            import re
+            digits = re.findall(r'\d+', user_message)
+            
+            if digits:
+                # Process multiple selections
+                ambiguous_name = self.disambiguation_session['current_name']
+                options = self.disambiguation_session['options']
+                
+                # Store selected options for feedback
+                selected_options = []
+                
+                # Process all selected options
+                for i, digit in enumerate(digits):
+                    try:
+                        selection = int(digit)
+                        # Adjust to 0-based index
+                        index = selection - 1
+                        
+                        if 0 <= index < len(options):
+                            _, _, email = options[index]
+                            
+                            # Use suffixed names for multiple selections
+                            if i == 0:
+                                name_to_use = ambiguous_name
+                            else:
+                                name_to_use = f"{ambiguous_name} {i+1}"
+                                
+                            # Store the resolved email
+                            meeting.attendee_emails[name_to_use] = email
+                            # Add to the final attendee list
+                            if name_to_use not in preserved_attendees:
+                                preserved_attendees.append(name_to_use)
+                                
+                            selected_options.append(str(selection))
+                    except ValueError:
+                        continue
+                
+                # Set final attendee list with all preserved and resolved
+                meeting.attendees = preserved_attendees
+                
+                if selected_options:
+                    # Clear disambiguation state
+                    self.disambiguation_session = None
+                    self.pending_attendees = []
+                    self.resolved_attendees = []
+                    
+                    # Show confirmation
+                    if meeting.is_complete():
+                        return self._generate_confirmation_message(meeting), True
+                    else:
+                        # Check if anything else is missing
+                        missing = meeting.get_missing_info()
+                        if missing:
+                            missing_str = ", ".join(missing)
+                            return f"Selected attendees (options {', '.join(selected_options)}) added. I still need the following details: {missing_str.capitalize()}.", True
+                        else:
+                            return f"Selected attendees (options {', '.join(selected_options)}) added. What else would you like to add to this meeting?", True
+                else:
+                    return "Please enter valid option numbers, 'both' to select all, or multiple numbers like '1 2' separated by spaces.", True
+        
+        # Handle single number selection
         try:
             selection = int(user_message.strip())
             # Adjust to 0-based index
-            selection -= 1
+            index = selection - 1
             
-            # Process the selection
-            result = self.attendee_resolver.resolve_disambiguation_selection(
-                self.disambiguation_session['session_id'], 
-                selection
-            )
+            ambiguous_name = self.disambiguation_session['current_name']
+            options = self.disambiguation_session['options']
             
-            if result['status'] == 'error':
-                return f"Error: {result['message']}. Please try again.", True
-            
-            if result['status'] == 'completed':
-                # All ambiguous attendees have been resolved
-                self.resolved_attendees.extend(result['resolved_attendees'])
+            if 0 <= index < len(options):
+                _, _, email = options[index]
                 
-                # Update the meeting attendees
-                meeting = self.get_current_meeting()
-                
-                # Update attendee list with resolved names
-                updated_attendees = []
-                
-                # Add previously resolved attendees
-                for attendee in meeting.attendees:
-                    # Check if this is a pending attendee
-                    if attendee not in self.pending_attendees:
-                        updated_attendees.append(attendee)
-                
-                # Add newly resolved attendees
-                for name, email in self.resolved_attendees:
-                    # Store the resolved email in the attendee object
-                    meeting.attendee_emails[name] = email
-                    updated_attendees.append(name)
-                
-                meeting.attendees = updated_attendees
+                # Store the resolved email
+                meeting.attendee_emails[ambiguous_name] = email
+                # Add to final attendee list if not already there
+                if ambiguous_name not in preserved_attendees:
+                    preserved_attendees.append(ambiguous_name)
+                    
+                # Set final attendee list with all preserved and resolved
+                meeting.attendees = preserved_attendees
                 
                 # Clear disambiguation state
                 self.disambiguation_session = None
@@ -105,21 +205,11 @@ class ConversationState:
                     missing = meeting.get_missing_info()
                     if missing:
                         missing_str = ", ".join(missing)
-                        return f"Attendees added. I still need the following details: {missing_str.capitalize()}.", True
+                        return f"Attendee added. I still need the following details: {missing_str.capitalize()}.", True
                     else:
-                        return "Attendees added. What else would you like to add to this meeting?", True
-            
-            if result['status'] == 'in_progress':
-                # Continue with the next ambiguous attendee
-                self.disambiguation_session = result
-                
-                # Generate the options message
-                options_message = self.attendee_resolver.format_disambiguation_options(
-                    result['current_name'],
-                    result['options']
-                )
-                
-                return options_message, True
+                        return "Attendee added. What else would you like to add to this meeting?", True
+            else:
+                return f"Invalid selection. Please enter a number between 1 and {len(options)}.", True
         
         except ValueError:
             # Not a number, maybe user wants to cancel disambiguation
@@ -134,10 +224,10 @@ class ConversationState:
                     
                     return "Attendee selection cancelled. What would you like to do?", True
             
-            return "Please enter a number to select an attendee, or 'cancel' to stop.", True
+            return "Please enter a number to select an attendee, 'both' to select all, or multiple numbers like '1 2' for multiple selections.", True
         
         return None, False
-    
+
     def resolve_attendees(self, meeting, attendee_names):
         """
         Resolve attendee names to email addresses
@@ -147,37 +237,55 @@ class ConversationState:
         # Debug statement
         print(f"DEBUG: resolve_attendees called with: {attendee_names}")
         
-        # Try to resolve the attendees
-        resolved, ambiguous, not_found = self.attendee_resolver.resolve_attendees(attendee_names)
+        # Process each attendee name, but keep track of which ones need disambiguation
+        ambiguous_attendees = {}
+        resolved_pairs = []
+        not_found_names = []
+        pending_for_disambiguation = []
         
-        # Debug
-        print(f"DEBUG: Resolution results - resolved: {resolved}, ambiguous: {ambiguous}, not_found: {not_found}")
+        for name in attendee_names:
+            # Skip if already has an email assigned
+            if name in meeting.attendee_emails:
+                continue
+                
+            # Try to resolve single attendee
+            result = self.attendee_resolver.resolve_single_attendee(name)
+            
+            if result['status'] == 'resolved':
+                # Attendee resolved successfully
+                email = result['email']
+                resolved_pairs.append((name, email))
+                
+            elif result['status'] == 'ambiguous':
+                # Attendee needs disambiguation
+                ambiguous_attendees[name] = result['options']
+                pending_for_disambiguation.append(name)
+                
+            elif result['status'] == 'not_found':
+                # Attendee not found
+                not_found_names.append(name)
         
         # If we have attendees not found in the database, return error message
-        if not_found:
-            not_found_names = ", ".join(not_found)
-            error_message = f"I couldn't find the following attendee(s) in the organization: {not_found_names}. Please choose employees from your organization only."
+        if not_found_names:
+            not_found_names_str = ", ".join(not_found_names)
+            error_message = f"I couldn't find the following attendee(s) in the organization: {not_found_names_str}. Please choose employees from your organization only."
             return (False, error_message)
         
         # Add resolved attendees to the meeting
-        for name, email in resolved:
-            # Check if already in the list
-            if name not in meeting.attendees:
-                meeting.attendees.append(name)
-            
+        for name, email in resolved_pairs:
             # Store the email
             meeting.attendee_emails[name] = email
         
         # If we have ambiguous attendees, start disambiguation
-        if ambiguous:
+        if ambiguous_attendees:
             # Debug statement
-            print(f"DEBUG: Starting disambiguation for ambiguous attendees: {list(ambiguous.keys())}")
+            print(f"DEBUG: Starting disambiguation for ambiguous attendees: {list(ambiguous_attendees.keys())}")
             
             # Store the ambiguous attendees for later
-            self.pending_attendees = list(ambiguous.keys())
+            self.pending_attendees = pending_for_disambiguation
             
             # Start disambiguation session
-            self.disambiguation_session = self.attendee_resolver.start_disambiguation_session(ambiguous)
+            self.disambiguation_session = self.attendee_resolver.start_disambiguation_session(ambiguous_attendees)
             
             # Debug
             print(f"DEBUG: Disambiguation session created: {self.disambiguation_session}")
@@ -187,7 +295,7 @@ class ConversationState:
         # Debug statement
         print("DEBUG: All attendees resolved successfully")
         return (True, None)  # All resolved successfully
-    
+
     def _extract_date_from_message(self, meeting, message):
         """
         Try to extract date information directly from the message text
@@ -236,33 +344,6 @@ class ConversationState:
         Handle an intent and update the state accordingly
         Returns a response message
         """
-        # Check if we're in disambiguation mode
-        if self.disambiguation_session:
-            response, handled = self.handle_attendee_disambiguation(user_message)
-            if handled:
-                return response
-                
-        print(f"Handling intent: {intent}")
-        print(f"Entities extracted: {entities}")
-        print(f"User message: {user_message}")
-        
-        meeting = self.get_current_meeting()
-        original_message = user_message.lower().strip()
-        
-        # Handling restart and change scenarios
-        restart_phrases = ['nope', 'no', 'not correct', 'start over', 'reset', 'cancel']
-        confirmation_phrases = ['yes', 'confirm', 'ok', 'okay', 'correct', 'that is correct', 'looks good']
-        
-        # ADD HERE: Check for confirmation before entity processing
-        if meeting.is_complete() and any(phrase == original_message for phrase in confirmation_phrases):
-            # Explicit confirmation - avoid processing as an entity
-            meeting.is_confirmed = True
-            return "✅ Meeting scheduled successfully!"
-            
-        if any(phrase == original_message for phrase in restart_phrases):
-            # Completely reset the meeting
-            meeting = self.start_new_meeting()
-            return "Meeting context has been reset. I'm ready to start over. How can I help you schedule a meeting?"
         # CRITICAL FIX: First process all entities regardless of intent
         # This ensures we capture everything the user mentioned
         if entities:
@@ -270,6 +351,11 @@ class ConversationState:
             if meeting:
                 updates = meeting.update_from_entities(entities)
                 print(f"Processed all entities first: {updates}")
+                
+                # Validate date is not in the past (NEW)
+                if meeting.date and not self.validate_date(meeting.date):
+                    meeting.date = None  # Reset the invalid date
+                    return "Sorry, you can't schedule a meeting for a date in the past. Please choose a future date."
                 
                 # NEW: Always check for attendee resolution when attendees are updated
                 if 'attendees' in updates or getattr(meeting, 'needs_attendee_resolution', False):
@@ -319,8 +405,18 @@ class ConversationState:
         
         # Handling restart and change scenarios
         restart_phrases = ['nope', 'no', 'not correct', 'start over', 'reset', 'cancel']
-        confirmation_phrases = ['yes', 'confirm', 'ok', 'okay']
+        confirmation_phrases = ['yes', 'confirm', 'ok', 'okay', 'correct', 'that is correct', 'looks good']
         
+        if meeting.is_complete() and any(phrase == original_message for phrase in confirmation_phrases):
+            # Explicit confirmation - avoid processing as an entity
+            meeting.is_confirmed = True
+            return "✅ Meeting scheduled successfully!"
+        
+        if any(phrase == original_message for phrase in restart_phrases):
+            # Completely reset the meeting
+            meeting = self.start_new_meeting()
+            return "Meeting context has been reset. I'm ready to start over. How can I help you schedule a meeting?"
+                
         # Direct duration extraction - catch "Make the duration 2 hours"
         if "DURATION" in entities and entities["DURATION"]:
             duration_text = entities["DURATION"][0]
@@ -360,6 +456,10 @@ class ConversationState:
                 # Try to parse the date
                 parsed_date = self.date_parser.parse_date(user_message)
                 if parsed_date:
+                    # Validate date is not in the past (NEW)
+                    if not self.validate_date(parsed_date):
+                        return "Sorry, you can't schedule a meeting for a date in the past. Please choose a future date."
+                        
                     meeting.date = parsed_date
                     self.change_mode = None
                     date_str = meeting.date.strftime("%A, %B %d, %Y")
@@ -380,6 +480,10 @@ class ConversationState:
                         days_ahead = 7  # If today, get next week
                         
                     next_date = self.reference_date + datetime.timedelta(days=days_ahead)
+                    # Validate date is not in the past (should not happen, but just in case)
+                    if not self.validate_date(next_date):
+                        return "Sorry, there was an issue with the date. Please choose a future date."
+                        
                     meeting.date = next_date
                     date_str = next_date.strftime("%A, %B %d, %Y")
                     return f"Date set to {date_str}."
@@ -471,6 +575,10 @@ class ConversationState:
             if entities['DATE']:
                 parsed_date = self.date_parser.parse_date(entities['DATE'][0])
                 if parsed_date:
+                    # Validate date is not in the past (NEW)
+                    if not self.validate_date(parsed_date):
+                        return "Sorry, you can't schedule a meeting for a date in the past. Please choose a future date."
+                        
                     meeting.date = parsed_date
                     
                     # Return a confirmation request instead of auto-confirming
@@ -506,6 +614,11 @@ class ConversationState:
             
             # Debug output to see what's in the meeting context after update
             print(f"DEBUG: After update, meeting state: {meeting.to_dict()}")
+            
+            # CRITICAL FIX: Check if date is in the past (NEW)
+            if meeting.date and not self.validate_date(meeting.date):
+                meeting.date = None  # Reset the invalid date
+                return "Sorry, you can't schedule a meeting for a date in the past. Please choose a future date."
             
             # CRITICAL FIX: Resolve attendees if any were extracted
             if meeting.attendees:
@@ -687,11 +800,11 @@ class ConversationState:
             
             if "TIME" in entities and entities["TIME"]:
                 time_str = meeting.date_parser.format_time(meeting.time)
-                response = f"No problem. Time changed to {time_str}."
+                response = f"Time set to {time_str}."
                 
                 # If meeting is otherwise complete, show confirmation
                 if meeting.is_complete():
-                    response += "\n" + self._generate_confirmation_message(meeting)
+                    response += "\n\n" + self._generate_confirmation_message(meeting)
                 else:
                     missing = meeting.get_missing_info()
                     missing_str = ", ".join(missing)
@@ -708,8 +821,12 @@ class ConversationState:
             
             if "DATE" in entities and entities["DATE"]:
                 if meeting.date:
+                    # Validate date is not in the past (NEW)
+                    if not self.validate_date(meeting.date):
+                        return "Sorry, you can't schedule a meeting for a date in the past. Please choose a future date."
+                    
                     date_str = meeting.date.strftime("%A, %B %d, %Y")
-                    response = f"No problem. Date changed to {date_str}."
+                    response = f"Date changed to {date_str}."
                 else:
                     response = "I couldn't parse that date. Please try a different format."
                     
@@ -722,8 +839,8 @@ class ConversationState:
                     response += f"\nI still need the following details: {missing_str.capitalize()}."
                 return response
             else:
-                self.waiting_for = "time"
-                return "What time would you like to change it to?"
+                self.waiting_for = "date"
+                return "What date would you like to change it to?"
         
         elif intent == "Change_Duration":
             # Update duration
@@ -732,11 +849,11 @@ class ConversationState:
             
             if "DURATION" in entities and entities["DURATION"]:
                 duration_str = meeting.date_parser.format_duration(meeting.duration)
-                response = f"No problem. Duration changed to {duration_str}."
+                response = f"Duration changed to {duration_str}."
                 
                 # If meeting is otherwise complete, show confirmation
                 if meeting.is_complete():
-                    response += "\n" + self._generate_confirmation_message(meeting)
+                    response += "\n\n" + self._generate_confirmation_message(meeting)
                 else:
                     missing = meeting.get_missing_info()
                     missing_str = ", ".join(missing)
@@ -766,6 +883,11 @@ class ConversationState:
             if self.waiting_for == "date":
                 # Try to extract date from the message
                 if self._extract_date_from_message(meeting, user_message):
+                    # Check if date is in the past (NEW)
+                    if not self.validate_date(meeting.date):
+                        meeting.date = None # Reset invalid date
+                        return "Sorry, you can't schedule a meeting for a date in the past. Please choose a future date."
+                    
                     self.waiting_for = None
                     
                     # Build response acknowledging the date
@@ -1015,3 +1137,11 @@ class ConversationState:
                 return True
             
         return False
+    
+    def validate_date(self, date_obj):
+        """Validate that a date is not in the past"""
+        today = datetime.datetime.now().date()
+        
+        if date_obj < today:
+            return False
+        return True

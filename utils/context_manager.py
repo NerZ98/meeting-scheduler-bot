@@ -95,85 +95,90 @@ class MeetingContext:
                     print(f"Updated duration to: {self.duration} from '{duration_text}'")
                     break
         
-        # Attendee processing 
+        # Improved attendee processing 
         if 'ATTENDEE' in entities and entities['ATTENDEE']:
-            # Create a set to store unique attendees
-            unique_attendees = set()
+            # Start with existing attendees (if any)
+            unique_attendees = set(self.attendees) if hasattr(self, 'attendees') else set()
             
-            for attendee in entities['ATTENDEE']:
-                if not attendee:
+            # Debug: print existing attendees
+            print(f"DEBUG: Existing attendees before update: {unique_attendees}")
+            
+            # Combine all attendee entities for more comprehensive processing
+            combined_attendee_text = " and ".join([a for a in entities['ATTENDEE'] if a])
+            print(f"DEBUG: Combined attendee text: '{combined_attendee_text}'")
+            
+            # Clean up the attendee text
+            cleaned_attendee = combined_attendee_text.lower()
+            
+            # Remove special tags like [sep]
+            cleaned_attendee = re.sub(r'\[.*?\]', ',', cleaned_attendee)
+            
+            # Filter out common non-attendee words and phrases
+            non_attendee_words = ['to this', 'to the', 'to our', 'for this', 'for the', 
+                                'meeting', 'call', 'hour', 'minute', 'add', 'invite', 
+                                'include', 'with', 'and add', 'and include', 'for', 'to it']
+            
+            for word in non_attendee_words:
+                cleaned_attendee = cleaned_attendee.replace(word, ',')
+            
+            # Split by commas, 'and', etc.
+            attendee_list = re.split(r',|\band\b', cleaned_attendee)
+            print(f"DEBUG: Split attendee list: {attendee_list}")
+            
+            # List of words to exclude as attendee names
+            exclude_words = ['yes', 'no', 'confirm', 'ok', 'okay', 'sure', 'correct', 
+                            'the', 'a', 'an', 'this', 'that', 'these', 'those', 
+                            'for', 'to', 'at', 'on', 'in', 'with', 'by']
+            
+            new_attendees = []
+            
+            for person in attendee_list:
+                person = person.strip()
+                # Skip empty names, single characters, numbers, or excluded words
+                if (not person or len(person) <= 1 or 
+                    person.isdigit() or 
+                    person in exclude_words or
+                    len(person.split()) > 5):  # Too many words to be a name
                     continue
                     
-                # Clean up the attendee text
-                cleaned_attendee = attendee.lower()
+                # Split the name into parts
+                name_parts = person.split()
                 
-                # Remove special tags like [sep]
-                cleaned_attendee = re.sub(r'\[.*?\]', ',', cleaned_attendee)
-                
-                # Filter out common non-attendee words and phrases
-                non_attendee_words = ['to this', 'to the', 'to our', 'for this', 'for the', 
-                                    'meeting', 'call', 'hour', 'minute', 'add', 'invite', 
-                                    'include', 'with', 'and add', 'and include']
-                
-                for word in non_attendee_words:
-                    cleaned_attendee = cleaned_attendee.replace(word, ',')
-                
-                # Split by commas, 'and', etc.
-                attendee_list = re.split(r',|\band\b', cleaned_attendee)
-                
-                for person in attendee_list:
-                    person = person.strip()
-                    if not person or len(person) <= 1:  # Skip empty names or single characters
+                # Handle full names
+                if len(name_parts) > 1:
+                    # Check each part isn't in the exclude words
+                    if any(part.lower() in exclude_words for part in name_parts):
                         continue
                         
-                    # Split the name into parts
-                    name_parts = person.split()
+                    # Capitalize each part of the full name
+                    full_name = ' '.join(part.capitalize() for part in name_parts)
                     
-                    # Handle full names
-                    if len(name_parts) > 1:
-                        # Capitalize each part of the full name
-                        full_name = ' '.join(part.capitalize() for part in name_parts)
+                    # Add to the new attendees list
+                    new_attendees.append(full_name)
+                else:
+                    # Single name case - be more careful
+                    if person.lower() in exclude_words:
+                        continue
                         
-                        # Check if full name already exists (case-insensitive)
-                        if not any(full_name.lower() == existing.lower() for existing in unique_attendees):
-                            # Remove any existing partial names
-                            unique_attendees = {
-                                existing for existing in unique_attendees 
-                                if existing.lower() not in full_name.lower()
-                            }
-                            unique_attendees.add(full_name)
-                    else:
-                        # Single name case
-                        capitalized_name = person.capitalize()
-                        
-                        # Avoid adding if a fuller version already exists
-                        if not any(capitalized_name.lower() in existing.lower() for existing in unique_attendees):
-                            unique_attendees.add(capitalized_name)
+                    capitalized_name = person.capitalize()
+                    
+                    # Add to the new attendees list
+                    new_attendees.append(capitalized_name)
+            
+            # Update the set of unique attendees
+            for attendee in new_attendees:
+                unique_attendees.add(attendee)
             
             # Update the attendees list
             self.attendees = list(unique_attendees)
             entity_updates['attendees'] = self.attendees
+            print(f"DEBUG: Final attendee list: {self.attendees}")
             
-            # Flag that we need attendee resolution (NEW)
+            # Flag that we need attendee resolution
             self.needs_attendee_resolution = True
         
-        # Check for time in text if TIME entity not detected
-        # This is a fallback mechanism
-        for entity_type, values in entities.items():
-            for value in values:
-                if "2pm" in value.lower() or "2 pm" in value.lower():
-                    if not self.time:
-                        self.time = self.date_parser.parse_time("2 PM")
-                        print(f"Fallback: Updated time to: {self.time}")
-                        
-                if "hour" in value.lower() and not self.duration:
-                    self.duration = 60  # 1 hour in minutes
-                    print(f"Fallback: Updated duration to: {self.duration}")
+        # [Rest of the method remains the same]
         
-        # Debug output
-        if entity_updates:
-            print(f"Updated entities: {entity_updates}")
-                
         return entity_updates
 
     def _process_raw_text(self, text, already_updated):
