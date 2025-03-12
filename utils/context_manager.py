@@ -95,7 +95,7 @@ class MeetingContext:
                     print(f"Updated duration to: {self.duration} from '{duration_text}'")
                     break
         
-        # IMPROVED: Better attendee processing with multiple attendee support
+        # FIXED: Improved attendee processing with better filtering for special tokens and markdown
         if 'ATTENDEE' in entities and entities['ATTENDEE']:
             # Start with existing attendees (if any)
             unique_attendees = set(self.attendees) if hasattr(self, 'attendees') else set()
@@ -103,105 +103,69 @@ class MeetingContext:
             # Debug: print existing attendees
             print(f"DEBUG: Existing attendees before update: {unique_attendees}")
             
-            # Combine all attendee entities for more comprehensive processing
-            combined_attendee_text = " and ".join([a for a in entities['ATTENDEE'] if a])
-            print(f"DEBUG: Combined attendee text: '{combined_attendee_text}'")
-            
-            # Clean up the attendee text
-            cleaned_attendee = combined_attendee_text.lower()
-            
-            # Remove special tags like [sep]
-            cleaned_attendee = re.sub(r'\[.*?\]', ',', cleaned_attendee)
-            
-            # Filter out common non-attendee words and phrases
-            non_attendee_words = ['to this', 'to the', 'to our', 'for this', 'for the', 
-                                'meeting', 'call', 'hour', 'minute', 'add', 'invite', 
-                                'include', 'with', 'and add', 'and include', 'for', 'to it']
-            
-            for word in non_attendee_words:
-                cleaned_attendee = cleaned_attendee.replace(word, ',')
-            
-            # IMPROVED: Better splitting to handle space-separated names as well
-            # First split by explicit separators (commas, 'and')
-            explicit_splits = re.split(r',|\band\b', cleaned_attendee)
-            
-            # For entries that look like multiple space-separated names, split them further
-            attendee_list = []
-            for item in explicit_splits:
-                item = item.strip()
-                
-                # If this looks like it might be multiple space-separated names
-                if len(item.split()) > 1:
-                    # Check if it's likely to be multiple names (capitalized words)
-                    words = item.split()
-                    # Only attempt to split if we have capitalized words in the original text
-                    # We check the original entities to determine if these are likely separate names
-                    
-                    # Add the whole item first
-                    if item:
-                        attendee_list.append(item)
-                    
-                    # Also add individual words that might be names
-                    # This is speculative, but helps catch "add John Jane" style inputs
-                    for word in words:
-                        word = word.strip()
-                        if (len(word) > 1 and 
-                            word.isalpha() and  # only alphabetic characters
-                            word not in ['and', 'with', 'add', 'to']):  # not connecting words
-                            attendee_list.append(word)
-                else:
-                    if item:
-                        attendee_list.append(item)
-                    
-            print(f"DEBUG: Split attendee list: {attendee_list}")
-            
-            # List of words to exclude as attendee names
-            exclude_words = ['yes', 'no', 'confirm', 'ok', 'okay', 'sure', 'correct', 
-                            'the', 'a', 'an', 'this', 'that', 'these', 'those', 
-                            'for', 'to', 'at', 'on', 'in', 'with', 'by', 'min']
-            
+            # Process each attendee separately
             new_attendees = []
             
-            for person in attendee_list:
-                person = person.strip()
-                # Skip empty names, single characters, numbers, or excluded words
-                if (not person or len(person) <= 1 or 
-                    person.isdigit() or 
-                    person in exclude_words or
-                    len(person.split()) > 5):  # Too many words to be a name
+            for attendee_text in entities['ATTENDEE']:
+                if not attendee_text:
+                    continue
+                
+                # Clean up the attendee name - strip and remove special tokens and markdown
+                attendee_name = attendee_text.strip()
+                
+                # Remove special tokens like [SEP], [CLS], etc.
+                attendee_name = re.sub(r'\[.*?\]', '', attendee_name).strip()
+                
+                # Skip names that are too short or only contain digits
+                if len(attendee_name) <= 2 or attendee_name.isdigit():
+                    continue
+                
+                # Skip common non-attendee words
+                non_attendee_words = [
+                    'to', 'the', 'this', 'that', 'these', 'those', 
+                    'meeting', 'call', 'hour', 'minute', 'add', 'invite', 
+                    'include', 'with', 'and', 'for', 'it', 'yes', 'no', 'ok',
+                    'okay', 'sure', 'confirm', 'correct', 'sep', 'cls'
+                ]
+                
+                # Skip if the entire name is a non-attendee word
+                if attendee_name.lower() in non_attendee_words:
                     continue
                     
-                # Split the name into parts
-                name_parts = person.split()
+                # Skip if the name contains any non-attendee word as a standalone word
+                skip = False
+                for word in attendee_name.lower().split():
+                    if word in non_attendee_words:
+                        skip = True
+                        break
                 
-                # Handle full names
-                if len(name_parts) > 1:
-                    # Check each part isn't in the exclude words
-                    if any(part.lower() in exclude_words for part in name_parts):
-                        continue
-                        
-                    # Capitalize each part of the full name
-                    full_name = ' '.join(part.capitalize() for part in name_parts)
-                    
-                    # Add to the new attendees list
-                    new_attendees.append(full_name)
+                if skip:
+                    continue
+                
+                # Avoid adding substrings of existing names or of each other
+                is_substring = False
+                for existing in unique_attendees:
+                    # Check if this attendee is a substring of an existing one
+                    if attendee_name.lower() in existing.lower() and attendee_name.lower() != existing.lower():
+                        is_substring = True
+                        break
+                
+                # Skip if it's a substring
+                if is_substring:
+                    continue
+                
+                # Properly capitalize the name
+                # For multi-word names, capitalize each word
+                if ' ' in attendee_name:
+                    capitalized_name = ' '.join(word.capitalize() for word in attendee_name.split())
                 else:
-                    # Single name case - be more careful
-                    if person.lower() in exclude_words:
-                        continue
-                        
-                    capitalized_name = person.capitalize()
-                    
-                    # Add to the new attendees list
-                    new_attendees.append(capitalized_name)
+                    capitalized_name = attendee_name.capitalize()
+                
+                new_attendees.append(capitalized_name)
             
-            # Update the set of unique attendees
+            # Add valid new attendees to our set
             for attendee in new_attendees:
                 unique_attendees.add(attendee)
-            
-            # Filter out anything that looks like a duration from attendees
-            unique_attendees = set([att for att in unique_attendees 
-                      if not re.search(r'\d+\s*(?:min|minute|hour|hr)', att.lower())])
             
             # Update the attendees list
             self.attendees = list(unique_attendees)
@@ -210,8 +174,6 @@ class MeetingContext:
             
             # Flag that we need attendee resolution
             self.needs_attendee_resolution = True
-        
-        # [Rest of the method remains the same]
         
         return entity_updates
 
@@ -251,8 +213,6 @@ class MeetingContext:
             len(self.attendees) > 0
         )
     
-# In MeetingContext class (context_manager.py)
-
     def get_missing_info(self):
         """Get a list of missing required information"""
         missing = []

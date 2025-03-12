@@ -53,6 +53,9 @@ class ConversationState:
         if not self.disambiguation_session:
             return None, False
         
+        print(f"DEBUG: Processing disambiguation response: '{user_message}'")
+        print(f"DEBUG: Current disambiguation session: {self.disambiguation_session}")
+        
         # Get current meeting and preserve non-ambiguous attendees
         meeting = self.get_current_meeting()
         
@@ -66,8 +69,16 @@ class ConversationState:
                 if attendee in meeting.attendee_emails:
                     preserved_emails[attendee] = meeting.attendee_emails[attendee]
         
+        # CRITICAL FIX: Clean the user message thoroughly
+        clean_message = user_message.strip()
+        
+        # Remove any special tokens or markdown
+        clean_message = re.sub(r'\[.*?\]', '', clean_message).strip()
+        
+        print(f"DEBUG: Cleaned disambiguation response: '{clean_message}'")
+        
         # Handle "both" or "all" responses
-        if user_message.lower() in ['both', 'all']:
+        if clean_message.lower() in ['both', 'all']:
             # Select all options
             ambiguous_name = self.disambiguation_session['current_name']
             options = self.disambiguation_session['options']
@@ -96,6 +107,8 @@ class ConversationState:
             self.pending_attendees = []
             self.resolved_attendees = []
             
+            print(f"DEBUG: Selected all attendees, new list: {preserved_attendees}")
+            
             # Show confirmation
             if meeting.is_complete():
                 return self._generate_confirmation_message(meeting), True
@@ -109,10 +122,9 @@ class ConversationState:
                     return "All matching attendees added. What else would you like to add to this meeting?", True
         
         # Handle multiple selection with spaces, commas, or logical connectors
-        if ' ' in user_message or ',' in user_message or ';' in user_message or ' and ' in user_message.lower():
+        if ' ' in clean_message or ',' in clean_message or ';' in clean_message or ' and ' in clean_message:
             # Extract all digits from the message
-            import re
-            digits = re.findall(r'\d+', user_message)
+            digits = re.findall(r'\d+', clean_message)
             
             if digits:
                 # Process multiple selections
@@ -157,6 +169,8 @@ class ConversationState:
                     self.pending_attendees = []
                     self.resolved_attendees = []
                     
+                    print(f"DEBUG: Selected multiple attendees {selected_options}, new list: {preserved_attendees}")
+                    
                     # Show confirmation
                     if meeting.is_complete():
                         return self._generate_confirmation_message(meeting), True
@@ -171,62 +185,75 @@ class ConversationState:
                 else:
                     return "Please enter valid option numbers, 'both' to select all, or multiple numbers like '1 2' separated by spaces.", True
         
-        # Handle single number selection
-        try:
-            selection = int(user_message.strip())
-            # Adjust to 0-based index
-            index = selection - 1
-            
-            ambiguous_name = self.disambiguation_session['current_name']
-            options = self.disambiguation_session['options']
-            
-            if 0 <= index < len(options):
-                _, _, email = options[index]
+        # CRITICAL FIX: Handle single number selection more robustly
+        if clean_message.isdigit():
+            try:
+                selection = int(clean_message)
+                # Adjust to 0-based index
+                index = selection - 1
                 
-                # Store the resolved email
-                meeting.attendee_emails[ambiguous_name] = email
-                # Add to final attendee list if not already there
-                if ambiguous_name not in preserved_attendees:
-                    preserved_attendees.append(ambiguous_name)
+                ambiguous_name = self.disambiguation_session['current_name']
+                options = self.disambiguation_session['options']
+                
+                print(f"DEBUG: Handling numeric selection: {selection} for {ambiguous_name}")
+                print(f"DEBUG: Available options: {options}")
+                
+                if 0 <= index < len(options):
+                    _, _, email = options[index]
                     
-                # Set final attendee list with all preserved and resolved
-                meeting.attendees = preserved_attendees
-                
-                # Clear disambiguation state
-                self.disambiguation_session = None
-                self.pending_attendees = []
-                self.resolved_attendees = []
-                
-                # Show confirmation
-                if meeting.is_complete():
-                    return self._generate_confirmation_message(meeting), True
-                else:
-                    # Check if anything else is missing
-                    missing = meeting.get_missing_info()
-                    if missing:
-                        missing_str = ", ".join(missing)
-                        return f"Attendee added. I still need the following details: {missing_str.capitalize()}.", True
-                    else:
-                        return "Attendee added. What else would you like to add to this meeting?", True
-            else:
-                return f"Invalid selection. Please enter a number between 1 and {len(options)}.", True
-        
-        except ValueError:
-            # Not a number, maybe user wants to cancel disambiguation
-            if user_message.lower() in ['cancel', 'stop', 'exit']:
-                if self.disambiguation_session:
-                    self.attendee_resolver.cancel_disambiguation_session(
-                        self.disambiguation_session['session_id']
-                    )
+                    # Store the resolved email
+                    meeting.attendee_emails[ambiguous_name] = email
+                    
+                    # Add to final attendee list if not already there
+                    if ambiguous_name not in preserved_attendees:
+                        preserved_attendees.append(ambiguous_name)
+                        
+                    # Set final attendee list with all preserved and resolved
+                    meeting.attendees = preserved_attendees
+                    
+                    print(f"DEBUG: Selected attendee at index {index}, new list: {preserved_attendees}")
+                    print(f"DEBUG: Resolved email: {email}")
+                    
+                    # Clear disambiguation state BEFORE generating a response
+                    temp_session = self.disambiguation_session  # Keep a copy for logging
                     self.disambiguation_session = None
                     self.pending_attendees = []
                     self.resolved_attendees = []
                     
-                    return "Attendee selection cancelled. What would you like to do?", True
-            
-            return "Please enter a number to select an attendee, 'both' to select all, or multiple numbers like '1 2' for multiple selections.", True
+                    print(f"DEBUG: Cleared disambiguation session (was: {temp_session})")
+                    
+                    # Show confirmation
+                    if meeting.is_complete():
+                        return self._generate_confirmation_message(meeting), True
+                    else:
+                        # Check if anything else is missing
+                        missing = meeting.get_missing_info()
+                        if missing:
+                            missing_str = ", ".join(missing)
+                            return f"Attendee {ambiguous_name} added. I still need the following details: {missing_str.capitalize()}.", True
+                        else:
+                            return f"Attendee {ambiguous_name} added. What else would you like to add to this meeting?", True
+                else:
+                    print(f"DEBUG: Invalid selection {selection}, options range: 1-{len(options)}")
+                    return f"Invalid selection. Please enter a number between 1 and {len(options)}.", True
+            except ValueError as e:
+                print(f"DEBUG: Error processing selection: {e}")
+                pass  # Fall through to the next checks
         
-        return None, False
+        # Not a number, maybe user wants to cancel disambiguation
+        if clean_message.lower() in ['cancel', 'stop', 'exit']:
+            if self.disambiguation_session:
+                self.attendee_resolver.cancel_disambiguation_session(
+                    self.disambiguation_session['session_id']
+                )
+                self.disambiguation_session = None
+                self.pending_attendees = []
+                self.resolved_attendees = []
+                
+                return "Attendee selection cancelled. What would you like to do?", True
+        
+        print("DEBUG: Could not process disambiguation response, sending help message")
+        return "Please enter a number to select an attendee, 'both' to select all, or 'cancel' to stop the selection process.", True
 
     def resolve_attendees(self, meeting, attendee_names):
         """

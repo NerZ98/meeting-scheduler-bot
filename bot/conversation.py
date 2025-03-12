@@ -42,13 +42,22 @@ class MeetingSchedulerBot:
         if user_message.lower() in ["hi", "hello", "hey"]:
             return self.greeting
         
-        # CRITICAL FIX: Preprocess the message to identify and handle special cases
-        lower_msg = user_message.lower().strip()
-        
         # Get the current meeting context
         meeting = self.state.get_current_meeting()
         
-        # CRITICAL FIX: Direct time processing - this catches statements like "at 2pm" that might be missed
+        # CRITICAL: Check for disambiguation mode first, before any entity extraction
+        if self.state.disambiguation_session:
+            # Try to handle the message as a disambiguation response
+            response, handled = self.state.handle_attendee_disambiguation(user_message)
+            if handled:
+                # Log the conversation
+                self.state.log_conversation(user_message, response)
+                return response
+        
+        # Preprocess the message to identify and handle special cases
+        lower_msg = user_message.lower().strip()
+        
+        # Direct time processing - this catches statements like "at 2pm" that might be missed
         if "at " in lower_msg and any(term in lower_msg for term in ["am", "pm", "o'clock"]):
             # Try to extract time directly
             try:
@@ -75,13 +84,13 @@ class MeetingSchedulerBot:
         entities = self.entity_model.predict(user_message)
         print(f"Extracted entities: {entities}")
         
-        # CRITICAL FIX: Add time entity if we detected it directly 
+        # Add time entity if we detected it directly 
         if meeting.time and 'TIME' not in entities:
             time_str = meeting.date_parser.format_time(meeting.time)
             entities['TIME'] = [time_str]
             print(f"Added missing TIME entity: {time_str}")
         
-        # CRITICAL FIX: Special case for follow-up time messages that might be missed
+        # Special case for follow-up time messages that might be missed
         if not entities and any(term in lower_msg for term in ["pm", "am", "o'clock"]):
             # This might be a time-only message that was missed by the entity extraction
             parsed_time = self.state.handle_time_in_message(meeting, user_message)
@@ -92,18 +101,18 @@ class MeetingSchedulerBot:
                 entities['TIME'] = [time_str]
                 print(f"Forced TIME entity for time-only message: {time_str}")
         
-        # CRITICAL FIX: For combined scheduling requests, make sure to process all entities at once
+        # For combined scheduling requests, make sure to process all entities at once
         if combined_request:
             meeting.update_from_entities(entities)
             
-            # CRITICAL: Check if all required info is present before responding
+            # Check if all required info is present before responding
             if meeting.is_complete():
                 return self.state.handle_intent(intent, entities, user_message)
         
         # Generate response based on intent and entities
         response = self.state.handle_intent(intent, entities, user_message)
         
-        # CRITICAL FIX: Special error handling for edge cases
+        # Special error handling for edge cases
         if "Sorry, I encountered an error" in response:
             # Try to handle the message as a time-only message
             if self.state.handle_time_in_message(meeting, user_message):
@@ -143,5 +152,6 @@ class MeetingSchedulerBot:
         self.state.conversation_history.clear()
         self.state.last_intent = None
         self.state.waiting_for = None
+        self.state.disambiguation_session = None
         
         return "Meeting context has been reset. I'm ready to start over. How can I help you schedule a meeting?"

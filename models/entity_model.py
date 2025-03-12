@@ -628,6 +628,9 @@ class EntityRecognitionModel:
         # Clean up the text first to avoid common pitfalls
         text_for_attendees = re.sub(r'\[.*?\]', ' ', text.lower())  # Remove [sep] and similar tags
         
+        # Store found attendees to avoid duplicates and check for substrings
+        found_attendees = set()
+        
         # ===== 1. EXPLICIT COMMA/AND SEPARATED LISTS =====
         # Match patterns like "add X, Y and Z" or "with A, B, and C" or "include D and E"
         attendee_pattern_explicit = r'(?:add|with|include|invite)\s+([\w\s,]+(?:\s+and\s+[\w\s]+)?)'
@@ -640,18 +643,26 @@ class EntityRecognitionModel:
             
             for part in name_parts:
                 name = part.strip()
-                if name and len(name) > 1:
-                    # Filter out common non-name words
-                    if name.lower() not in ['to', 'for', 'in', 'the', 'a', 'an', 'this', 'that', 'these', 'those', 'meeting']:
-                        entities['ATTENDEE'].append(name.capitalize())
+                # Apply stricter validation
+                if (name and len(name) > 2 and 
+                    name.lower() not in ['to', 'for', 'in', 'the', 'a', 'an', 'this', 'that', 'these', 'those', 'meeting']):
+                    # Check for substrings before adding
+                    is_substring = False
+                    for existing in found_attendees:
+                        if name.lower() in existing.lower() and name.lower() != existing.lower():
+                            is_substring = True
+                            break
+                    
+                    if not is_substring:
+                        found_attendees.add(name.capitalize())
         
         # ===== 2. SPACE-SEPARATED NAMES WITHOUT CONJUNCTIONS =====
-        # This handles cases like "add John Mary Smith"
+        # This handles cases like "add John Mary Smith" with caution
         attendee_patterns_space = [
-            r'add\s+([\w\s]+)',
-            r'with\s+([\w\s]+)',
-            r'invite\s+([\w\s]+)',
-            r'include\s+([\w\s]+)'
+            r'add\s+([\w\s]+)\b',
+            r'with\s+([\w\s]+)\b',
+            r'invite\s+([\w\s]+)\b',
+            r'include\s+([\w\s]+)\b'
         ]
         
         for pattern in attendee_patterns_space:
@@ -663,96 +674,45 @@ class EntityRecognitionModel:
                 if ',' in full_names_text or ' and ' in full_names_text:
                     continue
                     
-                # Split by spaces
-                words = full_names_text.split()
-                
-                # Process each word as a potential name
-                for word in words:
-                    word = word.strip()
-                    # Only consider words that look like names (capitalized in original text)
-                    if (word and len(word) > 1 and 
-                        word.lower() not in ['to', 'for', 'in', 'the', 'a', 'an', 'this', 'that', 'meeting']):
-                        entities['ATTENDEE'].append(word.capitalize())
-        
-        # ===== 3. ATTENDEES MENTIONED AFTER PREPOSITIONS =====
-        # This catches phrases like "meeting for John" or "call with Mary"
-        preposition_patterns = [
-            r'(?:meeting|call|appointment|chat|discussion|talking|speak)\s+(?:with|for)\s+([\w\s]+)',
-            r'(?:schedule|arrange|set up|book)\s+(?:with|for)\s+([\w\s]+)'
-        ]
-        
-        for pattern in preposition_patterns:
-            prep_matches = re.search(pattern, text_for_attendees)
-            if prep_matches:
-                names_after_prep = prep_matches.group(1).strip()
-                
-                # Skip if already processed
-                if any(name.lower() in names_after_prep.lower() for name in entities['ATTENDEE']):
-                    continue
+                # Process multi-word names with caution
+                if ' ' in full_names_text:
+                    # Check if this might be a compound name
+                    possible_name = full_names_text
+                    # Properly capitalize
+                    capitalized_name = ' '.join(word.capitalize() for word in possible_name.split())
                     
-                # Split by common separators first
-                if ',' in names_after_prep or ' and ' in names_after_prep:
-                    name_parts = re.split(r',|\s+and\s+', names_after_prep)
-                    for part in name_parts:
-                        name = part.strip()
-                        if name and len(name) > 1:
-                            if name.lower() not in ['to', 'for', 'in', 'the', 'a', 'an', 'this', 'that', 'meeting']:
-                                entities['ATTENDEE'].append(name.capitalize())
+                    # Add only if it seems like a valid name (not containing common words)
+                    common_words = ['to', 'for', 'in', 'the', 'a', 'an', 'this', 'that', 'these', 'those', 'meeting']
+                    if not any(word.lower() in common_words for word in possible_name.split()):
+                        found_attendees.add(capitalized_name)
                 else:
-                    # Try individual words
-                    words = names_after_prep.split()
-                    for word in words:
-                        word = word.strip()
-                        if (word and len(word) > 1 and 
-                            word.lower() not in ['to', 'for', 'in', 'the', 'a', 'an', 'this', 'that', 'meeting']):
-                            entities['ATTENDEE'].append(word.capitalize())
+                    # Single word - likely a name
+                    name = full_names_text.strip()
+                    if name and len(name) > 2:
+                        found_attendees.add(name.capitalize())
         
-        # ===== 4. DIRECT NAME EXTRACTION =====
-        # This handles simple mentions of names, like "John and Mary"
-        # Only use when there's strong evidence these are attendees
-        if 'schedule' in text_for_attendees or 'meeting' in text_for_attendees or 'add' in text_for_attendees:
-            # Look for patterns like "X and Y" that aren't preceded by keywords we already check
-            standalone_pattern = r'(?<!add\s)(?<!with\s)(?<!invite\s)(?<!include\s)([\w]+\s+and\s+[\w]+)'
-            standalone_matches = re.search(standalone_pattern, text_for_attendees)
-
-            if standalone_matches:
-                names_text = standalone_matches.group(1).strip()
-                name_parts = re.split(r'\s+and\s+', names_text)
-                
-                for part in name_parts:
-                    name = part.strip()
-                    if name and len(name) > 1:
-                        if name.lower() not in ['to', 'for', 'in', 'the', 'a', 'an', 'this', 'that', 'meeting']:
-                            entities['ATTENDEE'].append(name.capitalize())
+        # Combine all found attendees
+        for attendee in found_attendees:
+            if attendee not in entities['ATTENDEE']:
+                entities['ATTENDEE'].append(attendee)
         
-        # ===== 5. SPECIAL HANDLING FOR "ADD X Y Z" FORMAT =====
-        # This specifically handles the space-separated list after "add"
-        add_pattern = r'[Aa]dd\s+(.*?)(?:$|to\s+the\s+meeting)'
-        add_matches = re.search(add_pattern, text)
-        if add_matches:
-            names_text = add_matches.group(1).strip()
+        # Final cleaning - remove substrings from the entities list
+        cleaned_attendees = []
+        for attendee in entities['ATTENDEE']:
+            is_substring = False
+            for other in entities['ATTENDEE']:
+                # Check if this attendee is a substring of another but not identical
+                if (attendee.lower() in other.lower() and 
+                    attendee.lower() != other.lower() and 
+                    len(attendee) < len(other)):
+                    is_substring = True
+                    break
             
-            # First check for comma or "and" separated
-            if ',' in names_text or ' and ' in names_text:
-                name_parts = re.split(r',|\s+and\s+', names_text)
-                for part in name_parts:
-                    part = part.strip()
-                    if part and len(part) > 1:
-                        entities['ATTENDEE'].append(part.capitalize())
-            else:
-                # Space-separated names
-                words = names_text.split()
-                for word in words:
-                    word = word.strip()
-                    if (word and len(word) > 1 and 
-                        word.lower() not in ['to', 'for', 'in', 'the', 'a', 'an', 'this', 'that', 'meeting']):
-                        entities['ATTENDEE'].append(word.capitalize())
+            if not is_substring:
+                cleaned_attendees.append(attendee)
         
-        # Remove duplicates while preserving order
-        if entities['ATTENDEE']:
-            seen = set()
-            entities['ATTENDEE'] = [x for x in entities['ATTENDEE'] 
-                                  if not (x.lower() in seen or seen.add(x.lower()))]
+        # Replace with cleaned list
+        entities['ATTENDEE'] = cleaned_attendees
         
         print(f"Final attendee extraction: {entities['ATTENDEE']}")
         return entities
