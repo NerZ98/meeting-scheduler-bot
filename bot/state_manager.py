@@ -785,10 +785,26 @@ class ConversationState:
         Handle an intent and update the state accordingly
         Returns a response message
         """
+        # Get the current meeting
+        meeting = self.get_current_meeting()
+        original_message = user_message.lower().strip()
+        
+        # Handle confirmation specifically before processing entities
+        confirmation_phrases = ['yes', 'confirm', 'ok', 'okay', 'correct', 'that is correct', 'looks good']
+        
+        # If this is a Confirm_Meeting intent with a confirmation phrase, handle it before entity processing
+        if intent == "Confirm_Meeting" and any(phrase == original_message for phrase in confirmation_phrases):
+            if meeting.is_complete():
+                meeting.is_confirmed = True
+                return "✅ Meeting scheduled successfully!"
+            else:
+                missing = meeting.get_missing_info()
+                missing_str = ", ".join(missing)
+                return f"The meeting is not complete. Please provide these missing details: {missing_str.capitalize()}."
+        
         # CRITICAL FIX: First process all entities regardless of intent
         # This ensures we capture everything the user mentioned
         if entities:
-            meeting = self.get_current_meeting()
             if meeting:
                 updates = meeting.update_from_entities(entities)
                 print(f"Processed all entities first: {updates}")
@@ -841,12 +857,8 @@ class ConversationState:
         print(f"Entities extracted: {entities}")
         print(f"User message: {user_message}")
         
-        meeting = self.get_current_meeting()
-        original_message = user_message.lower().strip()
-        
         # Handling restart and change scenarios
         restart_phrases = ['nope', 'no', 'not correct', 'start over', 'reset', 'cancel']
-        confirmation_phrases = ['yes', 'confirm', 'ok', 'okay', 'correct', 'that is correct', 'looks good']
         
         if meeting.is_complete() and any(phrase == original_message for phrase in confirmation_phrases):
             # Explicit confirmation - avoid processing as an entity
@@ -1030,17 +1042,6 @@ class ConversationState:
             # Completely reset the meeting
             meeting = self.start_new_meeting()
             return "Meeting context has been reset. I'm ready to start over. How can I help you schedule a meeting?"
-        
-        # Explicit confirmation
-        if (intent == 'Confirm_Meeting' or intent == 'Other') and any(phrase in original_message for phrase in confirmation_phrases):
-            # Check if meeting is complete before confirming
-            if meeting.is_complete():
-                meeting.is_confirmed = True
-                return "✅ Meeting scheduled successfully!"
-            else:
-                missing = meeting.get_missing_info()
-                missing_str = ", ".join(missing)
-                return f"The meeting is not complete. Please provide these missing details: {missing_str.capitalize()}."
         
         if intent == "Schedule_Meeting":
             # Start new meeting if needed
