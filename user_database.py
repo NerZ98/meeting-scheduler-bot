@@ -200,3 +200,42 @@ class UserDatabase:
             if 'conn' in locals():
                 conn.close()
             raise
+        
+    def get_full_name_by_email(self, email):
+        """
+        Retrieve the full name for a given email address
+        
+        Parameters:
+        - email: Email address to look up
+        
+        Returns:
+        - Full name if found, otherwise returns None
+        """
+        try:
+            # Establish a new connection for this method
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT first_name, last_name 
+                FROM users 
+                WHERE email = ?
+            """, (email,))
+            
+            result = cursor.fetchone()
+            
+            # Close the connection
+            conn.close()
+            
+            if result:
+                first_name, last_name = result
+                full_name = f"{first_name} {last_name}".strip()
+                return full_name
+            
+            return None
+        except Exception as e:
+            self.logger.error(f"Error retrieving full name for {email}: {e}")
+            # Ensure connection is closed even if an error occurs
+            if 'conn' in locals():
+                conn.close()
+            return None

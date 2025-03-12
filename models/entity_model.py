@@ -553,38 +553,105 @@ class EntityRecognitionModel:
         """Extract time from compound statements that might include other entities"""
         time_in_compound = None
         
-        # Look for "at X" patterns in combined phrases
+        print(f"DEBUG: Extracting time from: '{text}'")
+        
+        # Look for "at X" patterns in combined phrases with more specific patterns first
         at_time_patterns = [
-            r'at\s+(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?',
-            r'at\s+(\d{1,2})\s*([ap]\.?m\.?)?',
+            # These patterns look for specific "at TIME" references
+            r'at\s+(\d{1,2}):(\d{2})\s*([ap]\.?m\.?)',  # "at 1:30pm"
+            r'at\s+(\d{1,2}):(\d{2})',                  # "at 1:30"
+            r'at\s+(\d{1,2})\s*([ap]\.?m\.?)',          # "at 1pm"
+            r'at\s+(\d{1,2})',                          # "at 1"
         ]
         
         for pattern in at_time_patterns:
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
                 hour = int(match.group(1))
-                minute = int(match.group(2)) if match.group(2) and match.group(2).isdigit() else 0
-                ampm = match.group(3) if len(match.groups()) > 2 and match.group(3) else None
                 
-                # If no AM/PM is specified, check for it in the text
+                # Get minutes if available, otherwise default to 0
+                minute = 0
+                if len(match.groups()) > 1 and match.group(2) and match.group(2).isdigit():
+                    minute = int(match.group(2))
+                
+                # Get AM/PM if available
+                ampm = None
+                if len(match.groups()) > 2 and match.group(3):
+                    ampm = match.group(3)
+                elif len(match.groups()) > 1 and match.group(2) and not match.group(2).isdigit():
+                    ampm = match.group(2)
+                
+                # If no explicit AM/PM, check nearby in text
                 if not ampm:
-                    am_match = re.search(r'\b[aA]\.?[mM]\.?\b', text)
-                    pm_match = re.search(r'\b[pP]\.?[mM]\.?\b', text)
+                    # Look for AM/PM markers nearby (within 10 characters)
+                    context = text[max(0, match.start()-10):min(len(text), match.end()+10)]
+                    am_match = re.search(r'\b[aA]\.?[mM]\.?\b', context)
+                    pm_match = re.search(r'\b[pP]\.?[mM]\.?\b', context)
                     
                     if pm_match and not am_match:
                         ampm = 'pm'
+                        print(f"DEBUG: Found nearby PM marker in: '{context}'")
                     elif am_match and not pm_match:
                         ampm = 'am'
+                        print(f"DEBUG: Found nearby AM marker in: '{context}'")
+                    
+                    # For business hours logic
+                    if not ampm:
+                        # For daytime meetings, assume 1-6 is PM (business hours)
+                        if 1 <= hour <= 6:
+                            ampm = 'pm'
+                            print(f"DEBUG: Using business hours logic, assuming {hour} is PM")
+                        elif 7 <= hour <= 11:
+                            ampm = 'am'
+                            print(f"DEBUG: Using business hours logic, assuming {hour} is AM")
                 
                 # Adjust hour based on AM/PM if specified
                 if ampm and ('p' in ampm.lower()) and hour < 12:
                     hour += 12
+                    print(f"DEBUG: Adjusting hour to {hour} for PM")
                 elif ampm and ('a' in ampm.lower()) and hour == 12:
                     hour = 0
-                    
-                time_in_compound = datetime.time(hour, minute)
-                break
+                    print(f"DEBUG: Adjusting 12 AM to {hour}")
+                
+                print(f"DEBUG: Extracted time {hour}:{minute:02d} from '{match.group(0)}'")
+                return datetime.time(hour, minute)
         
+        # Also check for standalone time expressions like "1:30pm"
+        standalone_patterns = [
+            r'(\d{1,2}):(\d{2})\s*([ap]\.?m\.?)',  # "1:30pm" 
+            r'(\d{1,2})\.(\d{2})\s*([ap]\.?m\.?)',  # "1.30pm"
+            r'(\d{1,2})\s*([ap]\.?m\.?)'            # "1pm"
+        ]
+        
+        for pattern in standalone_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                hour = int(match.group(1))
+                
+                # Handle minutes
+                minute = 0
+                if len(match.groups()) > 1 and match.group(2) and match.group(2).isdigit():
+                    minute = int(match.group(2))
+                
+                # Handle AM/PM
+                ampm = None
+                if len(match.groups()) > 2 and match.group(3):
+                    ampm = match.group(3)
+                elif len(match.groups()) > 1 and match.group(2) and not match.group(2).isdigit():
+                    ampm = match.group(2)
+                
+                # Adjust hour based on AM/PM
+                if ampm and ('p' in ampm.lower()) and hour < 12:
+                    hour += 12
+                    print(f"DEBUG: Adjusting hour to {hour} for PM")
+                elif ampm and ('a' in ampm.lower()) and hour == 12:
+                    hour = 0
+                    print(f"DEBUG: Adjusting 12 AM to {hour}")
+                
+                print(f"DEBUG: Extracted time {hour}:{minute:02d} from '{match.group(0)}'")
+                return datetime.time(hour, minute)
+        
+        print(f"DEBUG: Could not extract time from: '{text}'")
         return time_in_compound
 
     def load(self, model_path):
@@ -625,94 +692,120 @@ class EntityRecognitionModel:
         if 'ATTENDEE' not in entities:
             entities['ATTENDEE'] = []
         
-        # Clean up the text first to avoid common pitfalls
-        text_for_attendees = re.sub(r'\[.*?\]', ' ', text.lower())  # Remove [sep] and similar tags
+        # Store original attendees for debugging
+        original_attendees = entities['ATTENDEE'].copy()
+        print(f"DEBUG: Original attendee extraction: {original_attendees}")
         
-        # Store found attendees to avoid duplicates and check for substrings
-        found_attendees = set()
+        # CRITICAL FIX: First filter out obviously wrong attendee names
+        filtered_attendees = []
+        invalid_attendees = []
         
-        # ===== 1. EXPLICIT COMMA/AND SEPARATED LISTS =====
-        # Match patterns like "add X, Y and Z" or "with A, B, and C" or "include D and E"
-        attendee_pattern_explicit = r'(?:add|with|include|invite)\s+([\w\s,]+(?:\s+and\s+[\w\s]+)?)'
-        explicit_matches = re.search(attendee_pattern_explicit, text_for_attendees)
-        
-        if explicit_matches:
-            names_text = explicit_matches.group(1).strip()
-            # Split by commas and "and"
-            name_parts = re.split(r',|\s+and\s+', names_text)
-            
-            for part in name_parts:
-                name = part.strip()
-                # Apply stricter validation
-                if (name and len(name) > 2 and 
-                    name.lower() not in ['to', 'for', 'in', 'the', 'a', 'an', 'this', 'that', 'these', 'those', 'meeting']):
-                    # Check for substrings before adding
-                    is_substring = False
-                    for existing in found_attendees:
-                        if name.lower() in existing.lower() and name.lower() != existing.lower():
-                            is_substring = True
-                            break
-                    
-                    if not is_substring:
-                        found_attendees.add(name.capitalize())
-        
-        # ===== 2. SPACE-SEPARATED NAMES WITHOUT CONJUNCTIONS =====
-        # This handles cases like "add John Mary Smith" with caution
-        attendee_patterns_space = [
-            r'add\s+([\w\s]+)\b',
-            r'with\s+([\w\s]+)\b',
-            r'invite\s+([\w\s]+)\b',
-            r'include\s+([\w\s]+)\b'
+        # Action words that should never be part of an attendee name
+        action_words = [
+            'add', 'invite', 'include', 'with', 'and', 'get', 'bring', 'ask', 
+            'call', 'schedule', 'book', 'arrange', 'set', 'up', 'for', 'to'
         ]
         
-        for pattern in attendee_patterns_space:
-            space_matches = re.search(pattern, text_for_attendees)
-            if space_matches:
-                full_names_text = space_matches.group(1).strip()
-                
-                # Skip if already processed as comma/and separated
-                if ',' in full_names_text or ' and ' in full_names_text:
-                    continue
-                    
-                # Process multi-word names with caution
-                if ' ' in full_names_text:
-                    # Check if this might be a compound name
-                    possible_name = full_names_text
-                    # Properly capitalize
-                    capitalized_name = ' '.join(word.capitalize() for word in possible_name.split())
-                    
-                    # Add only if it seems like a valid name (not containing common words)
-                    common_words = ['to', 'for', 'in', 'the', 'a', 'an', 'this', 'that', 'these', 'those', 'meeting']
-                    if not any(word.lower() in common_words for word in possible_name.split()):
-                        found_attendees.add(capitalized_name)
-                else:
-                    # Single word - likely a name
-                    name = full_names_text.strip()
-                    if name and len(name) > 2:
-                        found_attendees.add(name.capitalize())
+        # Time-related patterns that should never be attendees
+        time_patterns = [
+            r'\d+\s*:\s*\d+',  # Matches patterns like "1:30"
+            r'\d+\s*(?:am|pm|a\.m\.|p\.m\.)',  # Matches patterns like "1pm", "2 a.m."
+            r'(?:min|minute|hour|sec|second)s?',  # Time units
+            r'duration',
+            r'tomorrow',
+            r'today',
+            r'monday|tuesday|wednesday|thursday|friday|saturday|sunday'
+        ]
         
-        # Combine all found attendees
-        for attendee in found_attendees:
-            if attendee not in entities['ATTENDEE']:
-                entities['ATTENDEE'].append(attendee)
+        # Build a combined pattern
+        combined_time_pattern = '|'.join(time_patterns)
         
-        # Final cleaning - remove substrings from the entities list
-        cleaned_attendees = []
+        # CRITICAL FIX: First identify full names (with spaces)
+        full_names = []
+        partial_names = []
+        
         for attendee in entities['ATTENDEE']:
-            is_substring = False
-            for other in entities['ATTENDEE']:
-                # Check if this attendee is a substring of another but not identical
-                if (attendee.lower() in other.lower() and 
-                    attendee.lower() != other.lower() and 
-                    len(attendee) < len(other)):
-                    is_substring = True
-                    break
+            # Skip empty or very short names
+            if not attendee or len(attendee) <= 2:
+                invalid_attendees.append(attendee)
+                continue
+                
+            # Clean up the name - strip and remove special tokens
+            clean_name = re.sub(r'\[.*?\]', '', attendee).strip()
             
-            if not is_substring:
-                cleaned_attendees.append(attendee)
+            # Skip if it looks like a time expression
+            if re.search(combined_time_pattern, clean_name.lower()):
+                invalid_attendees.append(attendee)
+                continue
+                
+            # Skip names that are just numbers or contain obvious time components
+            if clean_name.isdigit() or ':' in clean_name or re.search(r'\d+\s*(?:am|pm)', clean_name.lower()):
+                invalid_attendees.append(attendee)
+                continue
+                
+            # CRITICAL FIX: Check for action words at the beginning
+            lower_name = clean_name.lower()
+            words = lower_name.split()
+            
+            # Skip if the entire name starts with an action word
+            if words and words[0] in action_words:
+                invalid_attendees.append(attendee)
+                continue
+                
+            # CRITICAL: Skip phrases that begin with an action word followed by potential names
+            if len(words) >= 3 and words[0] in action_words:
+                # This might be something like "add john smith" or "invite mary jones"
+                invalid_attendees.append(attendee)
+                
+                # Try to extract just the name part
+                potential_name = ' '.join(words[1:])
+                if len(potential_name) > 2 and not re.search(combined_time_pattern, potential_name):
+                    # Capitalize properly
+                    extracted_name = ' '.join(word.capitalize() for word in potential_name.split())
+                    filtered_attendees.append(extracted_name)
+                continue
+                
+            # Skip common non-name words
+            non_name_words = ['min', 'at', 'for', 'the', 'a', 'an', 'this', 'that', 'make', 'sure', 
+                            'also', 'please', 'with', 'call', 'meeting', 'schedule', 'duration',
+                            'tomorrow', 'today', 'monday', 'tuesday', 'wednesday', 'thursday', 
+                            'friday', 'saturday', 'sunday']
+            
+            if clean_name.lower() in non_name_words or clean_name.lower() in action_words:
+                invalid_attendees.append(attendee)
+                continue
+            
+            # Properly capitalize the name
+            if ' ' in clean_name:
+                capitalized_name = ' '.join(word.capitalize() for word in clean_name.split())
+                full_names.append(capitalized_name)
+            else:
+                capitalized_name = clean_name.capitalize()
+                partial_names.append(capitalized_name)
         
-        # Replace with cleaned list
-        entities['ATTENDEE'] = cleaned_attendees
+        # CRITICAL FIX: Process full names first, then partial names that aren't part of full names
+        for full_name in full_names:
+            filtered_attendees.append(full_name)
+            
+            # Get the parts of this full name to filter out later
+            name_parts = full_name.split()
+            for part in name_parts:
+                # Check if this part is in our partial names list
+                for i, partial in enumerate(partial_names):
+                    if partial.lower() == part.lower():
+                        # This partial name is part of a full name, mark it to skip
+                        partial_names[i] = None
+        
+        # Add any remaining partial names
+        for partial_name in partial_names:
+            if partial_name is not None:
+                filtered_attendees.append(partial_name)
+        
+        if invalid_attendees:
+            print(f"DEBUG: Filtered out invalid attendees: {invalid_attendees}")
+        
+        # Replace the original list with our filtered list
+        entities['ATTENDEE'] = filtered_attendees
         
         print(f"Final attendee extraction: {entities['ATTENDEE']}")
         return entities

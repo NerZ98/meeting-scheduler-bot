@@ -65,16 +65,49 @@ class MeetingContext:
                 if not time_text:
                     continue
                     
+                # Skip if it looks like it has a parsing issue (like "at 1 :pm" which should be "at 1pm")
+                if ':' in time_text and ' :' in time_text:
+                    continue
+                    
                 parsed_time = self.date_parser.parse_time(time_text)
                 if parsed_time:
-                    # Check specificity - if AM/PM is explicitly mentioned
-                    specificity = len(time_text.split())
+                    # Calculate specificity score - prioritize complete time expressions
+                    specificity = 0
+                    
+                    # Having a colon (like "1:30") increases specificity
+                    if ':' in time_text:
+                        specificity += 5
+                    
+                    # Having AM/PM explicitly mentioned is highest priority
                     if 'am' in time_text.lower() or 'pm' in time_text.lower():
-                        specificity += 10  # Strongly prefer explicit AM/PM
+                        specificity += 15
+                        
+                    # Having minutes specified increases specificity
+                    minute_pattern = r':\d{2}'
+                    if re.search(minute_pattern, time_text):
+                        specificity += 8
+                        
+                    # Having "at" prefix makes it more likely to be a valid time reference
+                    if time_text.lower().startswith('at'):
+                        specificity += 3
+                    
+                    # Length of text (more detailed expressions get higher score)
+                    specificity += len(time_text.split())
+                    
+                    # Check if this time seems reasonable for a meeting (7am-10pm)
+                    hour = parsed_time.hour
+                    if 7 <= hour <= 22:
+                        specificity += 2  # Slightly prefer business hours
+                    
                     time_entities.append((parsed_time, time_text, specificity))
             
             # Sort by specificity (highest first)
             time_entities.sort(key=lambda x: x[2], reverse=True)
+            
+            # Print debug info for all time candidates
+            print("DEBUG: Time candidates sorted by specificity:")
+            for time, text, score in time_entities:
+                print(f"  - '{text}' -> {time} (score: {score})")
             
             # Use the most specific time
             if time_entities:
@@ -95,7 +128,7 @@ class MeetingContext:
                     print(f"Updated duration to: {self.duration} from '{duration_text}'")
                     break
         
-        # FIXED: Improved attendee processing with better filtering for special tokens and markdown
+        # CRITICAL FIX: Improved attendee filtering with rigorous validation and action word filtering
         if 'ATTENDEE' in entities and entities['ATTENDEE']:
             # Start with existing attendees (if any)
             unique_attendees = set(self.attendees) if hasattr(self, 'attendees') else set()
@@ -103,69 +136,69 @@ class MeetingContext:
             # Debug: print existing attendees
             print(f"DEBUG: Existing attendees before update: {unique_attendees}")
             
-            # Process each attendee separately
-            new_attendees = []
+            # Define words that should never be attendees
+            non_attendee_words = [
+                'min', 'at', 'for', 'the', 'a', 'an', 'this', 'that', 'make', 'sure', 
+                'also', 'please', 'with', 'call', 'meeting', 'schedule', 'duration',
+                'tomorrow', 'today', 'monday', 'tuesday', 'wednesday', 'thursday', 
+                'friday', 'saturday', 'sunday', 'to', 'it', 'yes', 'no', 'ok',
+                'okay', 'sure', 'confirm', 'correct', 'sep', 'cls'
+            ]
             
-            for attendee_text in entities['ATTENDEE']:
-                if not attendee_text:
-                    continue
-                
-                # Clean up the attendee name - strip and remove special tokens and markdown
-                attendee_name = attendee_text.strip()
-                
-                # Remove special tokens like [SEP], [CLS], etc.
-                attendee_name = re.sub(r'\[.*?\]', '', attendee_name).strip()
-                
-                # Skip names that are too short or only contain digits
-                if len(attendee_name) <= 2 or attendee_name.isdigit():
-                    continue
-                
-                # Skip common non-attendee words
-                non_attendee_words = [
-                    'to', 'the', 'this', 'that', 'these', 'those', 
-                    'meeting', 'call', 'hour', 'minute', 'add', 'invite', 
-                    'include', 'with', 'and', 'for', 'it', 'yes', 'no', 'ok',
-                    'okay', 'sure', 'confirm', 'correct', 'sep', 'cls'
-                ]
-                
-                # Skip if the entire name is a non-attendee word
-                if attendee_name.lower() in non_attendee_words:
+            # Action words that should never be part of an attendee name
+            action_words = [
+                'add', 'invite', 'include', 'with', 'and', 'get', 'bring', 'ask', 
+                'call', 'schedule', 'book', 'arrange', 'set', 'up', 'for', 'to'
+            ]
+            
+            # First identify full names vs partial names
+            full_names = []
+            partial_names = []
+            
+            for attendee_name in entities['ATTENDEE']:
+                # Skip empty names
+                if not attendee_name:
                     continue
                     
-                # Skip if the name contains any non-attendee word as a standalone word
-                skip = False
-                for word in attendee_name.lower().split():
-                    if word in non_attendee_words:
-                        skip = True
-                        break
+                # Clean the name
+                clean_name = re.sub(r'\[.*?\]', '', attendee_name).strip()
                 
-                if skip:
+                # Skip short names
+                if len(clean_name) <= 2:
                     continue
-                
-                # Avoid adding substrings of existing names or of each other
-                is_substring = False
-                for existing in unique_attendees:
-                    # Check if this attendee is a substring of an existing one
-                    if attendee_name.lower() in existing.lower() and attendee_name.lower() != existing.lower():
-                        is_substring = True
-                        break
-                
-                # Skip if it's a substring
-                if is_substring:
+                    
+                # CRITICAL FIX: Check if this name starts with an action word
+                words = clean_name.lower().split()
+                if words and words[0] in action_words:
+                    # Skip this entire name if it starts with an action word
                     continue
-                
-                # Properly capitalize the name
-                # For multi-word names, capitalize each word
-                if ' ' in attendee_name:
-                    capitalized_name = ' '.join(word.capitalize() for word in attendee_name.split())
+                    
+                # Check if the name has spaces (indicating a full name)
+                if ' ' in clean_name:
+                    # Capitalize properly
+                    capitalized_name = ' '.join(word.capitalize() for word in clean_name.split())
+                    full_names.append(capitalized_name)
                 else:
-                    capitalized_name = attendee_name.capitalize()
-                
-                new_attendees.append(capitalized_name)
+                    # Just a single name
+                    capitalized_name = clean_name.capitalize()
+                    partial_names.append(capitalized_name)
             
-            # Add valid new attendees to our set
-            for attendee in new_attendees:
-                unique_attendees.add(attendee)
+            # Process full names first
+            for full_name in full_names:
+                unique_attendees.add(full_name)
+                
+                # Extract parts of this full name
+                name_parts = full_name.split()
+                
+                # Remove any partial names that match parts of this full name
+                for partial in partial_names[:]:
+                    if partial in name_parts:
+                        # This partial name is already covered by a full name
+                        partial_names.remove(partial)
+            
+            # Add remaining partial names
+            for partial in partial_names:
+                unique_attendees.add(partial)
             
             # Update the attendees list
             self.attendees = list(unique_attendees)

@@ -59,17 +59,28 @@ class ConversationState:
         # Get current meeting and preserve non-ambiguous attendees
         meeting = self.get_current_meeting()
         
-        # Save all attendees that aren't being disambiguated
+        # CRITICAL FIX: Build a complete list of attendees to preserve, including already resolved ones
         preserved_attendees = []
         preserved_emails = {}
         
-        for attendee in meeting.attendees:
-            if attendee not in self.pending_attendees:
+        # Add currently resolved attendees with their emails
+        for attendee in self.resolved_attendees:
+            if attendee in meeting.attendee_emails:
                 preserved_attendees.append(attendee)
-                if attendee in meeting.attendee_emails:
-                    preserved_emails[attendee] = meeting.attendee_emails[attendee]
+                preserved_emails[attendee] = meeting.attendee_emails[attendee]
         
-        # CRITICAL FIX: Clean the user message thoroughly
+        # Add other attendees that aren't being disambiguated
+        for attendee in meeting.attendees:
+            if attendee not in self.pending_attendees or attendee in self.resolved_attendees:
+                if attendee not in preserved_attendees:  # Avoid duplicates
+                    preserved_attendees.append(attendee)
+                    if attendee in meeting.attendee_emails:
+                        preserved_emails[attendee] = meeting.attendee_emails[attendee]
+        
+        print(f"DEBUG: Preserved attendees before processing: {preserved_attendees}")
+        print(f"DEBUG: Preserved emails: {preserved_emails}")
+        
+        # Clean the user message thoroughly
         clean_message = user_message.strip()
         
         # Remove any special tokens or markdown
@@ -102,90 +113,53 @@ class ConversationState:
             # Reset the attendee list with all preserved and resolved attendees
             meeting.attendees = preserved_attendees
             
-            # Clear disambiguation state
-            self.disambiguation_session = None
-            self.pending_attendees = []
-            self.resolved_attendees = []
+            # FIX: Check if there are more attendees to disambiguate
+            self.resolved_attendees.append(ambiguous_name)
             
-            print(f"DEBUG: Selected all attendees, new list: {preserved_attendees}")
+            # Move to the next ambiguous attendee if there is one
+            remaining_pending = [a for a in self.pending_attendees if a not in self.resolved_attendees]
             
-            # Show confirmation
-            if meeting.is_complete():
-                return self._generate_confirmation_message(meeting), True
+            if remaining_pending:
+                # Get the next attendee to disambiguate
+                next_attendee = remaining_pending[0]
+                print(f"DEBUG: Moving to next ambiguous attendee: {next_attendee}")
+                
+                # Start a new disambiguation session for this attendee
+                result = self.attendee_resolver.resolve_single_attendee(next_attendee)
+                if result['status'] == 'ambiguous':
+                    self.disambiguation_session = {
+                        'session_id': str(uuid.uuid4()),
+                        'current_name': next_attendee,
+                        'options': result['options']
+                    }
+                    
+                    # Show disambiguation options for the next attendee
+                    options_message = self.attendee_resolver.format_disambiguation_options(
+                        next_attendee,
+                        result['options']
+                    )
+                    return options_message, True
             else:
-                # Check if anything else is missing
-                missing = meeting.get_missing_info()
-                if missing:
-                    missing_str = ", ".join(missing)
-                    return f"All matching attendees added. I still need the following details: {missing_str.capitalize()}.", True
+                # No more attendees to disambiguate
+                self.disambiguation_session = None
+                self.pending_attendees = []
+                self.resolved_attendees = []
+                
+                print(f"DEBUG: All attendees disambiguated, final list: {meeting.attendees}")
+                
+                # Show confirmation
+                if meeting.is_complete():
+                    return self._generate_confirmation_message(meeting), True
                 else:
-                    return "All matching attendees added. What else would you like to add to this meeting?", True
-        
-        # Handle multiple selection with spaces, commas, or logical connectors
-        if ' ' in clean_message or ',' in clean_message or ';' in clean_message or ' and ' in clean_message:
-            # Extract all digits from the message
-            digits = re.findall(r'\d+', clean_message)
-            
-            if digits:
-                # Process multiple selections
-                ambiguous_name = self.disambiguation_session['current_name']
-                options = self.disambiguation_session['options']
-                
-                # Store selected options for feedback
-                selected_options = []
-                
-                # Process all selected options
-                for i, digit in enumerate(digits):
-                    try:
-                        selection = int(digit)
-                        # Adjust to 0-based index
-                        index = selection - 1
-                        
-                        if 0 <= index < len(options):
-                            _, _, email = options[index]
-                            
-                            # Use suffixed names for multiple selections
-                            if i == 0:
-                                name_to_use = ambiguous_name
-                            else:
-                                name_to_use = f"{ambiguous_name} {i+1}"
-                                
-                            # Store the resolved email
-                            meeting.attendee_emails[name_to_use] = email
-                            # Add to the final attendee list
-                            if name_to_use not in preserved_attendees:
-                                preserved_attendees.append(name_to_use)
-                                
-                            selected_options.append(str(selection))
-                    except ValueError:
-                        continue
-                
-                # Set final attendee list with all preserved and resolved
-                meeting.attendees = preserved_attendees
-                
-                if selected_options:
-                    # Clear disambiguation state
-                    self.disambiguation_session = None
-                    self.pending_attendees = []
-                    self.resolved_attendees = []
-                    
-                    print(f"DEBUG: Selected multiple attendees {selected_options}, new list: {preserved_attendees}")
-                    
-                    # Show confirmation
-                    if meeting.is_complete():
-                        return self._generate_confirmation_message(meeting), True
+                    # Check if anything else is missing
+                    missing = meeting.get_missing_info()
+                    if missing:
+                        missing_str = ", ".join(missing)
+                        return f"All attendees added. I still need the following details: {missing_str.capitalize()}.", True
                     else:
-                        # Check if anything else is missing
-                        missing = meeting.get_missing_info()
-                        if missing:
-                            missing_str = ", ".join(missing)
-                            return f"Selected attendees (options {', '.join(selected_options)}) added. I still need the following details: {missing_str.capitalize()}.", True
-                        else:
-                            return f"Selected attendees (options {', '.join(selected_options)}) added. What else would you like to add to this meeting?", True
-                else:
-                    return "Please enter valid option numbers, 'both' to select all, or multiple numbers like '1 2' separated by spaces.", True
+                        return "All attendees added. What else would you like to add to this meeting?", True
         
-        # CRITICAL FIX: Handle single number selection more robustly
+        # CRITICAL FIX: Handle single number selection
         if clean_message.isdigit():
             try:
                 selection = int(clean_message)
@@ -207,20 +181,50 @@ class ConversationState:
                     # Add to final attendee list if not already there
                     if ambiguous_name not in preserved_attendees:
                         preserved_attendees.append(ambiguous_name)
-                        
+                    
                     # Set final attendee list with all preserved and resolved
                     meeting.attendees = preserved_attendees
                     
-                    print(f"DEBUG: Selected attendee at index {index}, new list: {preserved_attendees}")
+                    print(f"DEBUG: Selected attendee at index {index}, preserved list: {preserved_attendees}")
                     print(f"DEBUG: Resolved email: {email}")
                     
-                    # Clear disambiguation state BEFORE generating a response
-                    temp_session = self.disambiguation_session  # Keep a copy for logging
+                    # FIX: Track that we've resolved this attendee
+                    self.resolved_attendees.append(ambiguous_name)
+                    
+                    # FIX: Check if there are more attendees to disambiguate
+                    remaining_pending = [a for a in self.pending_attendees if a not in self.resolved_attendees]
+                    
+                    if remaining_pending:
+                        # Get the next attendee to disambiguate
+                        next_attendee = remaining_pending[0]
+                        print(f"DEBUG: Moving to next ambiguous attendee: {next_attendee}")
+                        
+                        # Start a new disambiguation session for this attendee
+                        result = self.attendee_resolver.resolve_single_attendee(next_attendee)
+                        if result['status'] == 'ambiguous':
+                            self.disambiguation_session = {
+                                'session_id': str(uuid.uuid4()),
+                                'current_name': next_attendee,
+                                'options': result['options']
+                            }
+                            
+                            # Show disambiguation options for the next attendee
+                            options_message = self.attendee_resolver.format_disambiguation_options(
+                                next_attendee,
+                                result['options']
+                            )
+                            return options_message, True
+                    
+                    # CRITICAL FIX: Ensure we pass the complete attendee list back to the meeting
+                    print(f"DEBUG: Updated attendee list after disambiguation: {preserved_attendees}")
+                    meeting.attendees = preserved_attendees
+                    
+                    # If no more attendees to disambiguate, clear the disambiguation state
                     self.disambiguation_session = None
                     self.pending_attendees = []
                     self.resolved_attendees = []
                     
-                    print(f"DEBUG: Cleared disambiguation session (was: {temp_session})")
+                    print(f"DEBUG: All attendees disambiguated, final list: {meeting.attendees}")
                     
                     # Show confirmation
                     if meeting.is_complete():
@@ -230,9 +234,9 @@ class ConversationState:
                         missing = meeting.get_missing_info()
                         if missing:
                             missing_str = ", ".join(missing)
-                            return f"Attendee {ambiguous_name} added. I still need the following details: {missing_str.capitalize()}.", True
+                            return f"Attendees added. I still need the following details: {missing_str.capitalize()}.", True
                         else:
-                            return f"Attendee {ambiguous_name} added. What else would you like to add to this meeting?", True
+                            return f"Attendees added. What else would you like to add to this meeting?", True
                 else:
                     print(f"DEBUG: Invalid selection {selection}, options range: 1-{len(options)}")
                     return f"Invalid selection. Please enter a number between 1 and {len(options)}.", True
@@ -257,46 +261,121 @@ class ConversationState:
 
     def resolve_attendees(self, meeting, attendee_names):
         """
-        Resolve attendee names to email addresses
+        Resolve attendee names to email addresses with comprehensive deduplication
         Returns True if all attendees were resolved, False if disambiguation is needed
         Returns a tuple of (success, message) if there are attendees not found in the database
         """
         # Debug statement
         print(f"DEBUG: resolve_attendees called with: {attendee_names}")
         
-        # Process each attendee name, but keep track of which ones need disambiguation
         ambiguous_attendees = {}
         resolved_pairs = []
         not_found_names = []
         pending_for_disambiguation = []
         
-        for name in attendee_names:
+        unique_emails = set()
+        duplicate_names = []
+        
+        # First identify all full names (first + last name format)
+        full_names = [name for name in attendee_names if ' ' in name]
+        # Then partial names
+        partial_names = [name for name in attendee_names if ' ' not in name]
+        
+        # Process full names first, as they're more specific
+        for name in full_names:
             # Skip if already has an email assigned
             if name in meeting.attendee_emails:
-                continue
+                email = meeting.attendee_emails[name]
+                # Check if this email is already in our list
+                if email in unique_emails:
+                    duplicate_names.append(name)
+                    continue
+                else:
+                    unique_emails.add(email)
+                    continue
                 
-            # Try to resolve single attendee
+            # Try to resolve full name
             result = self.attendee_resolver.resolve_single_attendee(name)
             
             if result['status'] == 'resolved':
-                # Attendee resolved successfully
+                # Full name resolved successfully
                 email = result['email']
+                
+                # Check if this email is already in our list
+                if email in unique_emails:
+                    duplicate_names.append(name)
+                    continue
+                    
+                # Add to unique emails and resolved pairs
+                unique_emails.add(email)
                 resolved_pairs.append((name, email))
                 
             elif result['status'] == 'ambiguous':
-                # Attendee needs disambiguation
+                # Full name needs disambiguation
                 ambiguous_attendees[name] = result['options']
                 pending_for_disambiguation.append(name)
                 
             elif result['status'] == 'not_found':
-                # Attendee not found
+                # Full name not found
                 not_found_names.append(name)
+        
+        # Now process partial names, but only if they don't overlap with full names
+        for name in partial_names:
+            # Check if this partial name is part of an already resolved full name
+            is_part_of_full_name = False
+            for full_name in full_names:
+                if name.lower() in full_name.lower().split():
+                    is_part_of_full_name = True
+                    duplicate_names.append(name)
+                    break
+                    
+            if is_part_of_full_name:
+                continue
+                
+            # Continue with regular processing
+            if name in meeting.attendee_emails:
+                email = meeting.attendee_emails[name]
+                # Check if this email is already in our list
+                if email in unique_emails:
+                    duplicate_names.append(name)
+                    continue
+                else:
+                    unique_emails.add(email)
+                    continue
+            
+            # Try to resolve partial name
+            result = self.attendee_resolver.resolve_single_attendee(name)
+            
+            if result['status'] == 'resolved':
+                email = result['email']
+                
+                # Check if this email is already in our list
+                if email in unique_emails:
+                    duplicate_names.append(name)
+                    continue
+                    
+                # Add to unique emails and resolved pairs
+                unique_emails.add(email)
+                resolved_pairs.append((name, email))
+                
+            elif result['status'] == 'ambiguous':
+                # Name needs disambiguation
+                ambiguous_attendees[name] = result['options']
+                pending_for_disambiguation.append(name)
+                
+            elif result['status'] == 'not_found':
+                # Name not found
+                not_found_names.append(name)
+        
+        # Report duplicates for debugging
+        if duplicate_names:
+            print(f"DEBUG: Removed duplicate/partial attendees: {duplicate_names}")
         
         # If we have attendees not found in the database, return error message
         if not_found_names:
             not_found_names_str = ", ".join(not_found_names)
             
-            # IMPROVED: Keep the attendees we did find and inform about the ones we didn't
+            # Keep the attendees we did find and inform about the ones we didn't
             # Add the resolved attendees to the meeting
             for name, email in resolved_pairs:
                 # Store the email
@@ -315,11 +394,19 @@ class ConversationState:
             # Debug statement
             print(f"DEBUG: Starting disambiguation for ambiguous attendees: {list(ambiguous_attendees.keys())}")
             
-            # Store the ambiguous attendees for later
+            # Store ALL ambiguous attendees for sequential processing
             self.pending_attendees = pending_for_disambiguation
+            self.resolved_attendees = []  # Reset resolved list
             
-            # Start disambiguation session
-            self.disambiguation_session = self.attendee_resolver.start_disambiguation_session(ambiguous_attendees)
+            # Get the first attendee to disambiguate
+            first_ambiguous = pending_for_disambiguation[0]
+            
+            # Start disambiguation session for the first ambiguous attendee
+            self.disambiguation_session = {
+                'session_id': str(uuid.uuid4()),
+                'current_name': first_ambiguous,
+                'options': ambiguous_attendees[first_ambiguous]
+            }
             
             # Debug
             print(f"DEBUG: Disambiguation session created: {self.disambiguation_session}")
@@ -327,8 +414,328 @@ class ConversationState:
             return (False, None)  # No error message, but we need disambiguation
         
         # Debug statement
-        print("DEBUG: All attendees resolved successfully")
+        print(f"DEBUG: All attendees resolved successfully. Final list: {meeting.attendees}")
         return (True, None)  # All resolved successfully
+
+    def _consolidate_attendees(self, meeting):
+        """
+        Consolidate attendees to ensure the best names are used
+        and duplicates are removed based on email addresses
+        """
+        if not meeting.attendees or not hasattr(meeting, 'attendee_emails'):
+            return
+        
+        print("DEBUG: Consolidating attendees...")
+        print(f"DEBUG: Before consolidation: {meeting.attendees}")
+        print(f"DEBUG: Emails: {meeting.attendee_emails}")
+        
+        # Group attendees by email address
+        email_to_names = {}
+        
+        # First, collect all names that map to the same email
+        for name, email in meeting.attendee_emails.items():
+            if email not in email_to_names:
+                email_to_names[email] = []
+            email_to_names[email].append(name)
+        
+        # For each email, create the best representation
+        best_names = {}
+        for email, names in email_to_names.items():
+            # Prioritize full names (with spaces)
+            full_names = [name for name in names if ' ' in name]
+            partial_names = [name for name in names if ' ' not in name]
+            
+            # If full names exist, prefer those
+            if full_names:
+                best_name = full_names[0]
+            elif partial_names:
+                # If multiple partial names exist for the same email, combine them
+                if len(partial_names) > 1:
+                    best_name = ' '.join(partial_names)
+                else:
+                    best_name = partial_names[0]
+            else:
+                # Fallback (this should rarely happen)
+                best_name = names[0]
+            
+            best_names[email] = best_name
+            print(f"DEBUG: For email {email}, selected best name: {best_name} from {names}")
+        
+        # Create final attendees list
+        final_attendees = list(best_names.values())
+        final_emails = {name: email for email, name in zip(best_names.keys(), final_attendees)}
+        
+        # Update the meeting attendees list and emails
+        meeting.attendees = final_attendees
+        meeting.attendee_emails = final_emails
+        
+        print(f"DEBUG: After consolidation: {meeting.attendees}")
+        print(f"DEBUG: New emails: {meeting.attendee_emails}")
+            
+    def handle_attendee_disambiguation(self, user_message):
+        """
+        Handle disambiguation for attendees with multiple possible email matches
+        Returns a response message and True if the message was handled, False otherwise
+        """
+        if not self.disambiguation_session:
+            return None, False
+        
+        print(f"DEBUG: Processing disambiguation response: '{user_message}'")
+        print(f"DEBUG: Current disambiguation session: {self.disambiguation_session}")
+        
+        # Get current meeting and preserve non-ambiguous attendees
+        meeting = self.get_current_meeting()
+        
+        # CRITICAL: Build a complete list of attendees to preserve, including already resolved ones
+        preserved_attendees = []
+        preserved_emails = {}
+        
+        # Add currently resolved attendees with their emails
+        for attendee in self.resolved_attendees:
+            if attendee in meeting.attendee_emails:
+                preserved_attendees.append(attendee)
+                preserved_emails[attendee] = meeting.attendee_emails[attendee]
+        
+        # Add other attendees that aren't being disambiguated
+        for attendee in meeting.attendees:
+            if attendee not in self.pending_attendees or attendee in self.resolved_attendees:
+                if attendee not in preserved_attendees:  # Avoid duplicates
+                    preserved_attendees.append(attendee)
+                    if attendee in meeting.attendee_emails:
+                        preserved_emails[attendee] = meeting.attendee_emails[attendee]
+        
+        print(f"DEBUG: Preserved attendees before processing: {preserved_attendees}")
+        print(f"DEBUG: Preserved emails: {preserved_emails}")
+        
+        # Clean the user message thoroughly
+        clean_message = user_message.strip()
+        
+        # Remove any special tokens or markdown
+        clean_message = re.sub(r'\[.*?\]', '', clean_message).strip()
+        
+        print(f"DEBUG: Cleaned disambiguation response: '{clean_message}'")
+        
+        # Handle "both" or "all" responses
+        if clean_message.lower() in ['both', 'all']:
+            # Select all options
+            ambiguous_name = self.disambiguation_session['current_name']
+            options = self.disambiguation_session['options']
+            
+            # Add all options to resolved attendees
+            for i, option in enumerate(options):
+                _, _, email = option
+                
+                # Use suffixed names for multiple attendees with the same name
+                if i == 0:
+                    name_to_use = ambiguous_name
+                else:
+                    name_to_use = f"{ambiguous_name} {i+1}"
+                    
+                # Store the resolved email
+                meeting.attendee_emails[name_to_use] = email
+                # Add to the final attendee list
+                if name_to_use not in preserved_attendees:
+                    preserved_attendees.append(name_to_use)
+            
+            # Reset the attendee list with all preserved and resolved attendees
+            meeting.attendees = preserved_attendees
+            
+            # FIX: Check if there are more attendees to disambiguate
+            self.resolved_attendees.append(ambiguous_name)
+            
+            # Move to the next ambiguous attendee if there is one
+            remaining_pending = [a for a in self.pending_attendees if a not in self.resolved_attendees]
+            
+            if remaining_pending:
+                # Get the next attendee to disambiguate
+                next_attendee = remaining_pending[0]
+                print(f"DEBUG: Moving to next ambiguous attendee: {next_attendee}")
+                
+                # Start a new disambiguation session for this attendee
+                result = self.attendee_resolver.resolve_single_attendee(next_attendee)
+                if result['status'] == 'ambiguous':
+                    self.disambiguation_session = {
+                        'session_id': str(uuid.uuid4()),
+                        'current_name': next_attendee,
+                        'options': result['options']
+                    }
+                    
+                    # Show disambiguation options for the next attendee
+                    options_message = self.attendee_resolver.format_disambiguation_options(
+                        next_attendee,
+                        result['options']
+                    )
+                    return options_message, True
+            else:
+                # No more attendees to disambiguate
+                self.disambiguation_session = None
+                self.pending_attendees = []
+                self.resolved_attendees = []
+                
+                # CRITICAL: Consolidate attendees before generating a response
+                self._consolidate_attendees(meeting)
+                print(f"DEBUG: All attendees disambiguated, final list: {meeting.attendees}")
+                
+                # Show confirmation
+                if meeting.is_complete():
+                    return self._generate_confirmation_message(meeting), True
+                else:
+                    # Check if anything else is missing
+                    missing = meeting.get_missing_info()
+                    if missing:
+                        missing_str = ", ".join(missing)
+                        return f"All attendees added. I still need the following details: {missing_str.capitalize()}.", True
+                    else:
+                        return "All attendees added. What else would you like to add to this meeting?", True
+        
+        # CRITICAL FIX: Handle single number selection
+        if clean_message.isdigit():
+            try:
+                selection = int(clean_message)
+                # Adjust to 0-based index
+                index = selection - 1
+                
+                ambiguous_name = self.disambiguation_session['current_name']
+                options = self.disambiguation_session['options']
+                
+                print(f"DEBUG: Handling numeric selection: {selection} for {ambiguous_name}")
+                print(f"DEBUG: Available options: {options}")
+                
+                if 0 <= index < len(options):
+                    _, _, email = options[index]
+                    
+                    # Store the resolved email
+                    meeting.attendee_emails[ambiguous_name] = email
+                    
+                    # Add to final attendee list if not already there
+                    if ambiguous_name not in preserved_attendees:
+                        preserved_attendees.append(ambiguous_name)
+                    
+                    # Set final attendee list with all preserved and resolved
+                    meeting.attendees = preserved_attendees
+                    
+                    print(f"DEBUG: Selected attendee at index {index}, preserved list: {preserved_attendees}")
+                    print(f"DEBUG: Resolved email: {email}")
+                    
+                    # FIX: Track that we've resolved this attendee
+                    self.resolved_attendees.append(ambiguous_name)
+                    
+                    # FIX: Check if there are more attendees to disambiguate
+                    remaining_pending = [a for a in self.pending_attendees if a not in self.resolved_attendees]
+                    
+                    if remaining_pending:
+                        # Get the next attendee to disambiguate
+                        next_attendee = remaining_pending[0]
+                        print(f"DEBUG: Moving to next ambiguous attendee: {next_attendee}")
+                        
+                        # Start a new disambiguation session for this attendee
+                        result = self.attendee_resolver.resolve_single_attendee(next_attendee)
+                        if result['status'] == 'ambiguous':
+                            self.disambiguation_session = {
+                                'session_id': str(uuid.uuid4()),
+                                'current_name': next_attendee,
+                                'options': result['options']
+                            }
+                            
+                            # Show disambiguation options for the next attendee
+                            options_message = self.attendee_resolver.format_disambiguation_options(
+                                next_attendee,
+                                result['options']
+                            )
+                            return options_message, True
+                    
+                    # CRITICAL: If this is the last disambiguation, consolidate attendees
+                    if not remaining_pending:
+                        self.disambiguation_session = None
+                        self.pending_attendees = []
+                        self.resolved_attendees = []
+                        
+                        # Update the attendee list with the consolidated names
+                        self._consolidate_attendees(meeting)
+                        
+                        print(f"DEBUG: All attendees disambiguated, final list: {meeting.attendees}")
+                        
+                        # Show confirmation
+                        if meeting.is_complete():
+                            return self._generate_confirmation_message(meeting), True
+                        else:
+                            # Check if anything else is missing
+                            missing = meeting.get_missing_info()
+                            if missing:
+                                missing_str = ", ".join(missing)
+                                return f"Attendees added. I still need the following details: {missing_str.capitalize()}.", True
+                            else:
+                                return "Attendees added. What else would you like to add to this meeting?", True
+                else:
+                    print(f"DEBUG: Invalid selection {selection}, options range: 1-{len(options)}")
+                    return f"Invalid selection. Please enter a number between 1 and {len(options)}.", True
+            except ValueError as e:
+                print(f"DEBUG: Error processing selection: {e}")
+                pass  # Fall through to the next checks
+        
+        # Not a number, maybe user wants to cancel disambiguation
+        if clean_message.lower() in ['cancel', 'stop', 'exit']:
+            if self.disambiguation_session:
+                self.attendee_resolver.cancel_disambiguation_session(
+                    self.disambiguation_session['session_id']
+                )
+                self.disambiguation_session = None
+                self.pending_attendees = []
+                self.resolved_attendees = []
+                
+                return "Attendee selection cancelled. What would you like to do?", True
+        
+        print("DEBUG: Could not process disambiguation response, sending help message")
+        return "Please enter a number to select an attendee, 'both' to select all, or 'cancel' to stop the selection process.", True
+
+    def _generate_confirmation_message(self, meeting):
+        """
+        Generate a confirmation message based on the meeting state 
+        with comprehensive deduplication and attendee formatting
+        """
+        # CRITICAL: Consolidate attendees first to ensure best name representation
+        self._consolidate_attendees(meeting)
+        
+        message = "Okay! Let me confirm:\n"
+        
+        if meeting.date:
+            # Always use full date format instead of relative terms
+            date_str = meeting.date.strftime("%A, %B %d, %Y")
+            message += f"* Date: {date_str}\n"
+        
+        if meeting.time:
+            message += f"* Time: {meeting.date_parser.format_time(meeting.time)}\n"
+        
+        if meeting.duration:
+            message += f"* Duration: {meeting.date_parser.format_duration(meeting.duration)}\n"
+        
+        # Format attendees with full names and emails
+        if meeting.attendees and hasattr(meeting, 'attendee_emails') and meeting.attendee_emails:
+            formatted_attendees = []
+            for attendee in meeting.attendees:
+                if attendee in meeting.attendee_emails:
+                    email = meeting.attendee_emails[attendee]
+                    
+                    # Try to get full name from database
+                    try:
+                        full_name = self.attendee_resolver.db.get_full_name_by_email(email)
+                        if full_name:
+                            formatted_attendees.append(f"{full_name} ({email})")
+                        else:
+                            # Fallback to current name if full name not found
+                            formatted_attendees.append(f"{attendee} ({email})")
+                    except Exception:
+                        # If any error occurs, use the current name
+                        formatted_attendees.append(f"{attendee} ({email})")
+                else:
+                    formatted_attendees.append(attendee)
+            
+            if formatted_attendees:
+                attendees_str = ", ".join(formatted_attendees)
+                message += f"* Attendees: {attendees_str}\n"
+        
+        message += "Is that correct?"
+        return message
 
     def _extract_date_from_message(self, meeting, message):
         """
@@ -1059,38 +1466,64 @@ class ConversationState:
         # Fallback response
         return self.response_generator.get_fallback()
 
-    def _generate_confirmation_message(self, meeting):
-        """Generate a confirmation message based on the meeting state"""
-        message = "Okay! Let me confirm:\n"
+    # def _generate_confirmation_message(self, meeting):
+    #     """Generate a confirmation message based on the meeting state with strong deduplication"""
+    #     message = "Okay! Let me confirm:\n"
         
-        if meeting.date:
-            # Always use full date format instead of relative terms like "Tomorrow"
-            date_str = meeting.date.strftime("%A, %B %d, %Y")  # Example: "Tuesday, March 12, 2025"
-            message += f"* Date: {date_str}\n"
+    #     if meeting.date:
+    #         # Always use full date format instead of relative terms like "Tomorrow"
+    #         date_str = meeting.date.strftime("%A, %B %d, %Y")  # Example: "Tuesday, March 12, 2025"
+    #         message += f"* Date: {date_str}\n"
             
-        if meeting.time:
-            message += f"* Time: {meeting.date_parser.format_time(meeting.time)}\n"
+    #     if meeting.time:
+    #         message += f"* Time: {meeting.date_parser.format_time(meeting.time)}\n"
             
-        if meeting.duration:
-            message += f"* Duration: {meeting.date_parser.format_duration(meeting.duration)}\n"
+    #     if meeting.duration:
+    #         message += f"* Duration: {meeting.date_parser.format_duration(meeting.duration)}\n"
             
-        if meeting.attendees:
-            # Format attendees with their email addresses
-            formatted_attendees = []
-            for attendee in meeting.attendees:
-                # Get email if available
-                email = meeting.attendee_emails.get(attendee, "")
-                if email:
-                    formatted_attendees.append(f"{attendee} ({email})")
-                else:
-                    formatted_attendees.append(attendee)
-                    
-            attendees_str = ", ".join(formatted_attendees)
-            message += f"* Attendees: {attendees_str}\n"
+    #     # CRITICAL FIX: Completely overhaul attendee deduplication 
+    #     if meeting.attendees and hasattr(meeting, 'attendee_emails') and meeting.attendee_emails:
+    #         # First, group attendees by email
+    #         attendees_by_email = {}
             
-        message += "Is that correct?"
-        return message
-    
+    #         # Group all attendees with the same email
+    #         for attendee in meeting.attendees:
+    #             email = meeting.attendee_emails.get(attendee, "")
+    #             if email:
+    #                 if email not in attendees_by_email:
+    #                     attendees_by_email[email] = []
+    #                 attendees_by_email[email].append(attendee)
+            
+    #         # For each email, select the best attendee name (prioritize full names)
+    #         best_attendees = []
+    #         for email, names in attendees_by_email.items():
+    #             # Sort names by length and prefer names with spaces (usually full names)
+    #             sorted_names = sorted(names, key=lambda x: (-len(x), -x.count(' ')))
+    #             # Take the first (best) name
+    #             if sorted_names:
+    #                 best_name = sorted_names[0]
+    #                 best_attendees.append((best_name, email))
+            
+    #         # Include attendees without emails
+    #         for attendee in meeting.attendees:
+    #             if attendee not in meeting.attendee_emails:
+    #                 best_attendees.append((attendee, ""))
+            
+    #         # Format the attendees for display
+    #         if best_attendees:
+    #             formatted_attendees = []
+    #             for name, email in best_attendees:
+    #                 if email:
+    #                     formatted_attendees.append(f"{name} ({email})")
+    #                 else:
+    #                     formatted_attendees.append(name)
+                
+    #             attendees_str = ", ".join(formatted_attendees)
+    #             message += f"* Attendees: {attendees_str}\n"
+        
+    #     message += "Is that correct?"
+    #     return message
+
     def log_conversation(self, user_message, bot_response):
         """Log the conversation for context maintenance"""
         self.conversation_history.append({
