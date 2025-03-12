@@ -792,7 +792,7 @@ class EntityRecognitionModel:
             for part in name_parts:
                 # Check if this part is in our partial names list
                 for i, partial in enumerate(partial_names):
-                    if partial.lower() == part.lower():
+                    if partial and part and partial.lower() == part.lower():
                         # This partial name is part of a full name, mark it to skip
                         partial_names[i] = None
         

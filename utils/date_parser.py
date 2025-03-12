@@ -352,33 +352,79 @@ class DateTimeParser:
             return None
     
     def parse_duration(self, text):
-        """Parse a duration (in minutes) from natural language text"""
+        """
+        Comprehensive duration parsing from natural language text
+        """
         if not text:
             return None
-            
-        text = text.lower().strip()
-        total_minutes = 0
         
-        # Try each pattern
-        for pattern, parser_func in self.duration_patterns.items():
+        text = text.lower().strip()
+        
+        # Predefined duration mappings
+        duration_map = {
+            '30 min': 30,
+            '45 min': 45,
+            '1 hour': 60,
+            '60 min': 60,
+            '1.5 hours': 90,
+            '90 min': 90,
+            '2 hours': 120
+        }
+        
+        # Direct exact match
+        if text in duration_map:
+            return duration_map[text]
+        
+        # Try pattern matching
+        patterns = [
+            # Numeric patterns
+            r'(\d+)\s*(?:hour|hr)s?',  # "1 hour", "2 hours"
+            r'(\d+)\s*(?:minute|min)s?',  # "30 minutes", "45 mins"
+            
+            # Complex patterns
+            r'(\d+)\s*(?:hour|hr)s?\s*(?:and)?\s*(\d+)\s*(?:minute|min)s?',  # "1 hour and 30 minutes"
+            r'(\d+)(?:\s*-\s*|\s+)(?:minute|min)(?:\s+meeting)?',  # "60-minute meeting", "45 minute meeting"
+        ]
+        
+        for pattern in patterns:
             match = re.search(pattern, text)
             if match:
-                return parser_func(match)
+                # Handle different match group scenarios
+                if len(match.groups()) == 1:
+                    # Single number
+                    value = int(match.group(1))
+                    # Determine if it's hours or minutes
+                    if 'hour' in text or 'hr' in text:
+                        return value * 60
+                    return value
+                elif len(match.groups()) == 2:
+                    # Hours and minutes
+                    hours = int(match.group(1))
+                    minutes = int(match.group(2))
+                    return hours * 60 + minutes
         
-        # Check for hour+minute combo
-        hour_min_pattern = r'(\d+)\s*(?:hour|hr)s?\s*(?:and\s+)?(\d+)\s*(?:min|minute)s?'
-        match = re.search(hour_min_pattern, text)
-        if match:
-            hours = int(match.group(1))
-            minutes = int(match.group(2))
-            return hours * 60 + minutes
+        # Contextual parsing
+        if '60-minute' in text or '1-hour' in text:
+            return 60
         
-        # Default to 30 minutes if we just have "meeting" or similar
-        if 'meeting' in text or 'call' in text:
+        # Contextual pattern for "X-minute meeting"
+        contextual_match = re.search(r'(\d+)\s*-\s*minute\s*meeting', text)
+        if contextual_match:
+            return int(contextual_match.group(1))
+        
+        # Fuzzy matching for common terms
+        if 'half hour' in text or 'half an hour' in text:
             return 30
-            
+        
+        if 'hour and a half' in text or '1.5 hours' in text:
+            return 90
+        
+        # Fallback for meeting-like contexts
+        if 'meeting' in text or 'call' in text:
+            return 30  # Default to 30 minutes
+        
         return None
-    
+ 
     def format_date(self, date_obj):
         """Format a date object for display"""
         if not date_obj:
